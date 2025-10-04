@@ -97,10 +97,34 @@ def ensure_db_file_exists(db_path: str, template_name: str = "nigil_monitor.sqli
             pass
 
 
+GITHUB_REPO_URL_RE = re.compile(r"https?://github\.com/([^/]+)/([^/?#]+)(?:[/#?].*)?")
+
+
+def normalize_github_repo(repo_input: str) -> str:
+    """Преобразовать введённую строку в формат owner/repo."""
+    candidate = repo_input.strip()
+    if not candidate:
+        raise ValueError("Ссылка на репозиторий не указана")
+
+    match = GITHUB_REPO_URL_RE.fullmatch(candidate)
+    if match:
+        owner, repo_name = match.groups()
+        repo_name = repo_name.removesuffix(".git")
+        if not repo_name:
+            raise ValueError("Не удалось определить имя репозитория из ссылки")
+        return f"{owner}/{repo_name}"
+
+    if "/" not in candidate:
+        raise ValueError("Укажите репозиторий в формате owner/repo или ссылку на GitHub")
+
+    return candidate
+
+
 def self_update_from_github(repo: str, branch: str, files: Optional[List[str]] = None) -> List[str]:
     """Скачать свежие файлы из GitHub и перезаписать локальные."""
+    repo_normalized = normalize_github_repo(repo)
     files = files or ["NIGIL_status.py", "requirements.txt", "install.sh"]
-    base_url = f"https://raw.githubusercontent.com/{repo}/{branch}/"
+    base_url = f"https://raw.githubusercontent.com/{repo_normalized}/{branch}/"
     updated: List[str] = []
     script_dir = os.path.abspath(os.path.dirname(__file__))
 
@@ -1096,7 +1120,24 @@ def main(argv: Optional[List[str]] = None):
 
     if getattr(args, "self_update", False):
         files = args.update_files or None
-        updated = self_update_from_github(args.update_repo, args.update_branch, files)
+        default_repo = args.update_repo or "NIGIL-status/NIGIL_status"
+        prompt = (
+            "Введите ссылку на GitHub-репозиторий (формат owner/repo или https://github.com/...):\n"
+            f"[{default_repo}]: "
+        )
+        try:
+            user_repo = input(prompt).strip()
+        except EOFError:
+            user_repo = ""
+        repo_input = user_repo or default_repo
+
+        try:
+            normalized_repo = normalize_github_repo(repo_input)
+        except ValueError as exc:
+            print(f"[self-update] {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        updated = self_update_from_github(normalized_repo, args.update_branch, files)
         if updated:
             print("[self-update] Обновлены файлы:")
             for name in updated:
