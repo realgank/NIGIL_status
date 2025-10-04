@@ -59,8 +59,26 @@ normalize_requirements_url() {
 validate_requirements_file() {
   local path="$1"
 
-  if grep -qiE '<!DOCTYPE html|<html' "$path"; then
-    echo "[Ошибка] Получен HTML вместо requirements.txt. Укажите raw-ссылку на файл." >&2
+  if [ ! -s "$path" ]; then
+    echo "[Ошибка] Получен пустой файл requirements.txt." >&2
+    rm -f "$path"
+    return 1
+  fi
+
+  local head_sample
+  head_sample="$(head -c 512 "$path" 2>/dev/null || true)"
+
+  if [[ "$head_sample" =~ <!DOCTYPE[[:space:]]+html ]] || \
+     [[ "$head_sample" =~ <html ]] || \
+     [[ "$head_sample" =~ <head ]] || \
+     [[ "$head_sample" =~ <body ]] || \
+     [[ "$head_sample" =~ \{"message" ]] || \
+     [[ "$head_sample" =~ ^[[:space:]]*404: ]] || \
+     [[ "$head_sample" =~ ^[[:space:]]*403: ]] || \
+     [[ "$head_sample" =~ ^[[:space:]]*Not[[:space:]]+Found ]] || \
+     [[ "$head_sample" =~ ^[[:space:]]*<![[:upper:]] ]] || \
+     [[ "$head_sample" =~ ^<[[:alpha:]] ]] ; then
+    echo "[Ошибка] Получен HTML или ответ об ошибке вместо requirements.txt. Укажите raw-ссылку на файл." >&2
     rm -f "$path"
     return 1
   fi
