@@ -44,6 +44,52 @@ fi
 
 cd "$SCRIPT_DIR"
 
+download_requirements() {
+  local default_url="https://raw.githubusercontent.com/NIGIL-status/NIGIL_status/main/requirements.txt"
+  local url="${REQUIREMENTS_URL-}"
+
+  echo "requirements.txt не найден. Попробую скачать с GitHub..."
+
+  if [ -z "$url" ]; then
+    read -rp "Введите URL до raw requirements.txt [$default_url]: " url
+    url="${url:-$default_url}"
+  fi
+
+  if [ -z "$url" ]; then
+    echo "[Ошибка] URL для скачивания requirements.txt не указан." >&2
+    return 1
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$url" -o requirements.txt; then
+      echo "requirements.txt успешно скачан."
+      return 0
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -qO requirements.txt "$url"; then
+      echo "requirements.txt успешно скачан."
+      return 0
+    fi
+  else
+    echo "[Ошибка] Не найден curl или wget для скачивания файла." >&2
+    return 1
+  fi
+
+  echo "[Ошибка] Не удалось скачать requirements.txt по адресу: $url" >&2
+  return 1
+}
+
+if [ ! -f requirements.txt ]; then
+  if ! download_requirements; then
+    cat <<'ERR' >&2
+[Ошибка] Файл requirements.txt не найден и не удалось скачать автоматически.
+Сначала скачайте весь проект (например, через git clone из GitHub),
+или укажите корректный URL в переменной REQUIREMENTS_URL перед запуском.
+ERR
+    exit 1
+  fi
+fi
+
 if [ ! -d .venv ]; then
   echo "Создаю виртуальное окружение (.venv)..."
   python3 -m venv .venv
