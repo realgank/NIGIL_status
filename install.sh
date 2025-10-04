@@ -421,6 +421,17 @@ escape_systemd_value() {
   printf '%s' "$value"
 }
 
+escape_systemd_path() {
+  local path="$1"
+  if command -v systemd-escape >/dev/null 2>&1; then
+    systemd-escape --path "$path"
+  else
+    local escaped="${path//\\/\\\\}"
+    escaped="${escaped// /\\x20}"
+    printf '%s' "$escaped"
+  fi
+}
+
 build_env_line() {
   local name="$1"
   local value="$2"
@@ -470,7 +481,7 @@ After=network.target
 [Service]
 Type=simple
 User=${service_user}
-WorkingDirectory=${SCRIPT_DIR}
+WorkingDirectory=$(escape_systemd_path "$SCRIPT_DIR")
 ${UNIT_ENVIRONMENT}${EXEC_START_LINE}Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
