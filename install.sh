@@ -5,18 +5,91 @@ SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$SCRIPT_SOURCE_DIR"
 PROJECT_NAME="NIGIL Discord Bot"
 SERVICE_NAME="nigil-status-bot"
+LOG_FILE="$SCRIPT_DIR/nigil_install.log"
 
-run_root() {
-  if command -v sudo >/dev/null 2>&1 && [ "${SUDO_USER-}" != "root" ] && [ "$(id -u)" -ne 0 ]; then
-    sudo "$@"
-  else
-    "$@"
-  fi
+mkdir -p "$SCRIPT_DIR"
+touch "$LOG_FILE"
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
 }
 
-printf '\n=== Установщик %s ===\n\n' "$PROJECT_NAME"
+log_print() {
+  local level="$1"
+  shift
+  printf '%s [%s] %s\n' "$(timestamp)" "$level" "$*"
+}
 
-echo "Шаг 1. Настройка параметров бота."
+log_info() {
+  log_print INFO "$@"
+}
+
+log_warn() {
+  log_print WARN "$@" >&2
+}
+
+log_error() {
+  log_print ERROR "$@" >&2
+}
+
+log_success() {
+  log_print SUCCESS "$@"
+}
+
+log_step() {
+  log_print STEP "$@"
+}
+
+format_cmd() {
+  local arg
+  local parts=()
+  for arg in "$@"; do
+    parts+=("$(printf '%q' "$arg")")
+  done
+  printf '%s' "${parts[*]}"
+}
+
+run_logged() {
+  local command_str
+  command_str="$(format_cmd "$@")"
+  log_info "Выполняю команду: ${command_str}"
+  if ! "$@"; then
+    local status=$?
+    log_error "Команда завершилась с кодом ${status}: ${command_str}"
+    return $status
+  fi
+  log_success "Команда успешно завершена: ${command_str}"
+}
+
+run_root() {
+  local command_str
+  command_str="$(format_cmd "$@")"
+  if command -v sudo >/dev/null 2>&1 && [ "${SUDO_USER-}" != "root" ] && [ "$(id -u)" -ne 0 ]; then
+    log_info "Запускаю через sudo: ${command_str}"
+    if ! sudo "$@"; then
+      local status=$?
+      log_error "Команда завершилась с кодом ${status}: sudo ${command_str}"
+      return $status
+    fi
+  else
+    log_info "Запускаю без sudo: ${command_str}"
+    if ! "$@"; then
+      local status=$?
+      log_error "Команда завершилась с кодом ${status}: ${command_str}"
+      return $status
+    fi
+  fi
+  log_success "Команда успешно завершена: ${command_str}"
+}
+
+trap 'status=$?; if [ "$status" -eq 0 ]; then log_success "Установка завершена."; else log_error "Установка завершилась с ошибкой (код ${status}). Подробности см. в ${LOG_FILE}."; fi' EXIT
+
+log_info "Логи установки сохраняются в ${LOG_FILE}"
+log_info "=== Установщик ${PROJECT_NAME} ==="
+
+log_step "Шаг 1. Настройка параметров бота."
 
 prompt_required() {
   local prompt="$1"
@@ -28,7 +101,7 @@ prompt_required() {
       printf '%s' "$value"
       return
     fi
-    echo "Значение обязательно. Повторите ввод."
+    log_warn "Значение обязательно. Повторите ввод."
   done
 }
 
@@ -55,7 +128,7 @@ prompt_int() {
       printf '%s' "$value"
       return
     fi
-    echo "Введите целое число."
+    log_warn "Введите целое число."
   done
 }
 
@@ -70,7 +143,7 @@ prompt_float() {
       printf '%s' "$value"
       return
     fi
-    echo "Введите число."
+    log_warn "Введите число."
   done
 }
 
@@ -95,7 +168,7 @@ prompt_bool() {
       y|yes|д|да|true|1) printf 'true'; return ;;
       n|no|н|нет|false|0) printf 'false'; return ;;
     esac
-    echo "Введите y/n или да/нет."
+    log_warn "Введите y/n или да/нет."
   done
 }
 
@@ -112,7 +185,7 @@ DEFAULT_PIN_STATUS=true
 DEFAULT_LIVE_POST=true
 DEFAULT_TTL=0
 
-echo "Введите токен бота. Остальные настройки будут установлены значениями по умолчанию и их можно изменить через команды в Discord."
+log_info "Введите токен бота. Остальные настройки можно изменить через команды в Discord."
 
 BOT_TOKEN="$(prompt_required "Discord-токен бота")"
 CHANNEL_ID="$DEFAULT_CHANNEL_ID"
@@ -130,7 +203,7 @@ COMMAND_TTL="$DEFAULT_TTL"
 
 echo
 
-echo "Шаг 2. Загрузка исходного кода."
+log_step "Шаг 2. Загрузка исходного кода."
 
 if command -v git >/dev/null 2>&1; then
   DEFAULT_REPO_URL="$(git -C "$SCRIPT_DIR" config --get remote.origin.url 2>/dev/null || echo 'https://github.com/NIGIL-status/NIGIL_status.git')"
@@ -156,66 +229,71 @@ if [ "$DB_PATH" = "$ORIGINAL_DEFAULT_DB_PATH" ]; then
   DB_PATH="$INSTALL_DIR/nigil_monitor.sqlite3"
 fi
 
+log_info "Каталог установки: ${INSTALL_DIR}"
+log_info "Путь к базе данных: ${DB_PATH}"
+
 if ! command -v git >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    echo "Устанавливаю git (потребуется sudo)..."
+    log_info "Устанавливаю git (потребуется sudo)..."
     run_root apt-get update
     run_root apt-get install -y git
   else
-    echo "[Ошибка] git не найден и не удалось автоматически установить." >&2
+    log_error "git не найден и не удалось автоматически установить."
     exit 1
   fi
 fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
-  echo "Обновляю существующий репозиторий в $INSTALL_DIR..."
-  git -C "$INSTALL_DIR" fetch --all --tags
+  log_info "Обновляю существующий репозиторий в ${INSTALL_DIR}..."
+  run_logged git -C "$INSTALL_DIR" fetch --all --tags
+  log_info "Выполняю git pull --ff-only"
   if ! git -C "$INSTALL_DIR" pull --ff-only; then
-    echo "[Предупреждение] Не удалось выполнить git pull в $INSTALL_DIR. Проверьте локальные изменения." >&2
+    log_warn "Не удалось выполнить git pull в ${INSTALL_DIR}. Проверьте локальные изменения."
   fi
 elif [ -e "$INSTALL_DIR" ] && [ "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
-  echo "[Ошибка] Каталог $INSTALL_DIR уже существует и не является репозиторием Git." >&2
+  log_error "Каталог ${INSTALL_DIR} уже существует и не является репозиторием Git."
   exit 1
 else
-  echo "Клонирую репозиторий из $REPO_URL в $INSTALL_DIR..."
+  log_info "Клонирую репозиторий из ${REPO_URL} в ${INSTALL_DIR}..."
   if ! mkdir -p "$INSTALL_DIR"; then
-    echo "[Ошибка] Не удалось создать каталог $INSTALL_DIR. Запустите скрипт с правами, позволяющими запись." >&2
+    log_error "Не удалось создать каталог ${INSTALL_DIR}. Запустите скрипт с правами, позволяющими запись."
     exit 1
   fi
-  git clone "$REPO_URL" "$INSTALL_DIR"
+  run_logged git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
 SCRIPT_DIR="$INSTALL_DIR"
+log_info "Перехожу в каталог ${SCRIPT_DIR}"
 cd "$SCRIPT_DIR"
 
 PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
 
 echo
 
-echo "Шаг 3. Установка зависимостей."
+log_step "Шаг 3. Установка зависимостей."
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "[Ошибка] Python 3 не найден. Установите его командой: sudo apt-get install -y python3 python3-venv python3-pip" >&2
+  log_error "Python 3 не найден. Установите его командой: sudo apt-get install -y python3 python3-venv python3-pip"
   exit 1
 fi
 
 if ! command -v pip3 >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    echo "Устанавливаю python3-pip (потребуется sudo)..."
+    log_info "Устанавливаю python3-pip (потребуется sudo)..."
     run_root apt-get update
     run_root apt-get install -y python3-pip
   else
-    echo "[Ошибка] pip3 не найден и не удалось автоматически установить." >&2
+    log_error "pip3 не найден и не удалось автоматически установить."
     exit 1
   fi
 fi
 
 if ! python3 -m venv --help >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    echo "Устанавливаю python3-venv (потребуется sudo)..."
+    log_info "Устанавливаю python3-venv (потребуется sudo)..."
     run_root apt-get install -y python3-venv
   else
-    echo "[Ошибка] Модуль venv недоступен. Установите пакет python3-venv." >&2
+    log_error "Модуль venv недоступен. Установите пакет python3-venv."
     exit 1
   fi
 fi
@@ -236,7 +314,7 @@ validate_requirements_file() {
   local path="$1"
 
   if grep -qiE '<!DOCTYPE html|<html' "$path"; then
-    echo "[Ошибка] Получен HTML вместо requirements.txt. Укажите raw-ссылку на файл." >&2
+    log_error "Получен HTML вместо requirements.txt. Укажите raw-ссылку на файл."
     rm -f "$path"
     return 1
   fi
@@ -248,7 +326,7 @@ download_requirements() {
   local default_url="https://raw.githubusercontent.com/NIGIL-status/NIGIL_status/main/requirements.txt"
   local url="${REQUIREMENTS_URL-}"
 
-  echo "requirements.txt не найден. Попробую скачать с GitHub..."
+  log_info "requirements.txt не найден. Попробую скачать с GitHub..."
 
   if [ -z "$url" ]; then
     read -rp "Введите URL до raw requirements.txt [$default_url]: " url
@@ -256,69 +334,70 @@ download_requirements() {
   fi
 
   if [ -z "$url" ]; then
-    echo "[Ошибка] URL для скачивания requirements.txt не указан." >&2
+    log_error "URL для скачивания requirements.txt не указан."
     return 1
   fi
 
   local normalized_url
   normalized_url="$(normalize_requirements_url "$url")"
   if [ "$normalized_url" != "$url" ]; then
-    echo "Обнаружена ссылка на GitHub. Использую raw-вариант: $normalized_url"
+    log_info "Обнаружена ссылка на GitHub. Использую raw-вариант: $normalized_url"
   fi
   url="$normalized_url"
 
   if command -v curl >/dev/null 2>&1; then
+    log_info "Скачиваю requirements.txt с помощью curl: $url"
     if curl -fsSL "$url" -o requirements.txt && validate_requirements_file requirements.txt; then
-      echo "requirements.txt успешно скачан."
+      log_success "requirements.txt успешно скачан."
       return 0
     fi
   elif command -v wget >/dev/null 2>&1; then
+    log_info "Скачиваю requirements.txt с помощью wget: $url"
     if wget -qO requirements.txt "$url" && validate_requirements_file requirements.txt; then
-      echo "requirements.txt успешно скачан."
+      log_success "requirements.txt успешно скачан."
       return 0
     fi
   else
-    echo "[Ошибка] Не найден curl или wget для скачивания файла." >&2
+    log_error "Не найден curl или wget для скачивания файла."
     return 1
   fi
 
-  echo "[Ошибка] Не удалось скачать requirements.txt по адресу: $url" >&2
+  log_error "Не удалось скачать requirements.txt по адресу: $url"
   return 1
 }
 
 if [ ! -f requirements.txt ]; then
   if ! download_requirements; then
-    cat <<'ERR' >&2
-[Ошибка] Файл requirements.txt не найден и не удалось скачать автоматически.
-Сначала скачайте весь проект (например, через git clone из GitHub),
-или укажите корректный URL в переменной REQUIREMENTS_URL перед запуском.
-ERR
+    log_error "Файл requirements.txt не найден и не удалось скачать автоматически."
+    log_error "Сначала скачайте весь проект (например, через git clone из GitHub)."
+    log_error "Либо укажите корректный URL в переменной REQUIREMENTS_URL перед запуском."
     exit 1
   fi
 fi
 
 if [ ! -d .venv ]; then
-  echo "Создаю виртуальное окружение (.venv)..."
-  python3 -m venv .venv
+  log_info "Создаю виртуальное окружение (.venv)..."
+  run_logged python3 -m venv .venv
 fi
 
 # shellcheck disable=SC1091
+log_info "Активирую виртуальное окружение (.venv)"
 source .venv/bin/activate
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+run_logged python -m pip install --upgrade pip
+run_logged python -m pip install -r requirements.txt
 
 echo
 
-echo "Шаг 4. Настройка автозапуска."
+log_step "Шаг 4. Настройка автозапуска."
 
 if ! command -v systemctl >/dev/null 2>&1; then
-  echo "[Предупреждение] systemd недоступен. Пропускаю создание сервиса автозапуска." >&2
+  log_warn "systemd недоступен. Пропускаю создание сервиса автозапуска."
   exit 0
 fi
 
 if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-  echo "[Ошибка] Для настройки автозапуска требуются права суперпользователя (sudo или запуск от root)." >&2
+  log_error "Для настройки автозапуска требуются права суперпользователя (sudo или запуск от root)."
   exit 1
 fi
 
@@ -327,15 +406,11 @@ read -rp "Укажите пользователя для запуска серв
 service_user="${service_user:-$default_user}"
 
 if ! id "$service_user" >/dev/null 2>&1; then
-  echo "[Ошибка] Пользователь ${service_user} не найден в системе." >&2
+  log_error "Пользователь ${service_user} не найден в системе."
   exit 1
 fi
 
-cat <<EOF
-
-Создаю systemd-сервис ${SERVICE_NAME}.service от имени пользователя ${service_user}.
-
-EOF
+log_info "Создаю systemd-сервис ${SERVICE_NAME}.service от имени пользователя ${service_user}."
 
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
@@ -404,30 +479,29 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 "
 
-echo "${UNIT_CONTENT}" | run_root tee "${SERVICE_FILE}" >/dev/null
+log_info "Генерирую unit-файл ${SERVICE_FILE}"
+tmp_unit_file="$(mktemp)"
+printf '%s\n' "${UNIT_CONTENT}" >"${tmp_unit_file}"
+run_root install -m 0644 "${tmp_unit_file}" "${SERVICE_FILE}"
+rm -f "${tmp_unit_file}"
 run_root systemctl daemon-reload
 run_root systemctl enable --now "${SERVICE_NAME}.service"
 
-cat <<MSG
-Готово. Сервис ${SERVICE_NAME}.service создан и запущен.
-Убедитесь, что переменные окружения в unit-файле заданы корректно.
-Проверить состояние: sudo systemctl status ${SERVICE_NAME}.service
-Логи: journalctl -u ${SERVICE_NAME}.service -f
-
-Для ручного запуска экспортируйте переменные окружения и выполните:
-  export NIGIL_TOKEN='${BOT_TOKEN}'
-  export NIGIL_CHANNEL_ID='${CHANNEL_ID}'
-  export NIGIL_DB_PATH='${DB_PATH}'
-  export NIGIL_WEEKLY_LIMIT='${WEEKLY_LIMIT}'
-  export NIGIL_COOLDOWN_HOURS='${COOLDOWN_HOURS}'
-  export NIGIL_NOTIFY_PERIOD_MIN='${NOTIFY_MIN}'
-  export NIGIL_AUTO_CLEAN_SECONDS='${AUTO_CLEAN}'
-  export NIGIL_FUZZY_CUTOFF='${FUZZY_CUTOFF}'
-  export NIGIL_SYSTEM_NAME_REGEX='${SYSTEM_REGEX}'
-  export NIGIL_TIMEZONE='${TIMEZONE}'
-  export NIGIL_PIN_STATUS_MESSAGE='${PIN_STATUS}'
-  export NIGIL_LIVE_POST_ONLY='${LIVE_POST}'
-  export NIGIL_COMMAND_REPLY_TTL='${COMMAND_TTL}'
-  ${PYTHON_BIN} ${SCRIPT_DIR}/NIGIL_status.py
-
-MSG
+log_success "Сервис ${SERVICE_NAME}.service создан и запущен."
+log_info "Проверка состояния: sudo systemctl status ${SERVICE_NAME}.service"
+log_info "Логи сервиса: journalctl -u ${SERVICE_NAME}.service -f"
+log_info "Для ручного запуска экспортируйте переменные окружения и выполните:"
+log_info "  export NIGIL_TOKEN='<укажите токен вручную>' (полное значение не выводится в лог)"
+log_info "  export NIGIL_CHANNEL_ID='${CHANNEL_ID}'"
+log_info "  export NIGIL_DB_PATH='${DB_PATH}'"
+log_info "  export NIGIL_WEEKLY_LIMIT='${WEEKLY_LIMIT}'"
+log_info "  export NIGIL_COOLDOWN_HOURS='${COOLDOWN_HOURS}'"
+log_info "  export NIGIL_NOTIFY_PERIOD_MIN='${NOTIFY_MIN}'"
+log_info "  export NIGIL_AUTO_CLEAN_SECONDS='${AUTO_CLEAN}'"
+log_info "  export NIGIL_FUZZY_CUTOFF='${FUZZY_CUTOFF}'"
+log_info "  export NIGIL_SYSTEM_NAME_REGEX='${SYSTEM_REGEX}'"
+log_info "  export NIGIL_TIMEZONE='${TIMEZONE}'"
+log_info "  export NIGIL_PIN_STATUS_MESSAGE='${PIN_STATUS}'"
+log_info "  export NIGIL_LIVE_POST_ONLY='${LIVE_POST}'"
+log_info "  export NIGIL_COMMAND_REPLY_TTL='${COMMAND_TTL}'"
+log_info "  ${PYTHON_BIN} ${SCRIPT_DIR}/NIGIL_status.py"

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import re
 import shutil
@@ -8,6 +8,7 @@ import urllib.request
 import asyncio
 import difflib
 import argparse
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -37,6 +38,34 @@ def resource_path(rel_path: str) -> str:
 # Каталог данных (по умолчанию рядом с .py/.exe)
 DATA_DIR = os.path.abspath(".")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Каталог со скриптом и файл логов
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+LOG_FILE_PATH = os.path.join(SCRIPT_DIR, "nigil_status.log")
+
+
+def setup_logging() -> logging.Logger:
+    """Настроить логгер, пишущий в файл рядом со скриптом и в консоль."""
+    logger = logging.getLogger("nigil_status")
+    if logger.handlers:
+        return logger
+
+    os.makedirs(SCRIPT_DIR, exist_ok=True)
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    logger.propagate = False
+    logger.info("==== Запуск NIGIL_status ====")
+    return logger
 
 # =========================
 # ===== CONFIG LOGIC ======
@@ -70,6 +99,7 @@ def _parse_bool_env(value: str) -> bool:
 
 def load_config_from_env() -> dict:
     cfg: Dict[str, object] = {}
+    logger = logging.getLogger("nigil_status")
     for key, (env_name, converter, default) in ENV_CONFIG_SPEC.items():
         raw = os.getenv(env_name)
         if raw is None or raw == "":
@@ -82,8 +112,11 @@ def load_config_from_env() -> dict:
                     value = converter(raw)
             except Exception as exc:
                 print(f"[config] Переменная окружения {env_name} содержит некорректное значение: {exc}", file=sys.stderr)
+                logger.error("[config] Переменная окружения %s содержит некорректное значение: %s", env_name, exc)
                 sys.exit(1)
         cfg[key] = value
+        safe_value = "***" if "token" in key.lower() else value
+        logger.info("[config] %s = %s", key, safe_value)
     return cfg
 
 def ensure_db_file_exists(db_path: str, template_name: str = "nigil_monitor.sqlite3"):
@@ -127,10 +160,14 @@ def self_update_from_github(repo: str, branch: str, files: Optional[List[str]] =
     base_url = f"https://raw.githubusercontent.com/{repo_normalized}/{branch}/"
     updated: List[str] = []
     script_dir = os.path.abspath(os.path.dirname(__file__))
+    logger = logging.getLogger("nigil_status")
+
+    logger.info("[self-update] Начало обновления из %s (ветка %s)", repo_normalized, branch)
 
     for rel_path in files:
         url = base_url + rel_path
         dest = os.path.join(script_dir, rel_path)
+        logger.info("[self-update] Загружаю %s", url)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -139,6 +176,7 @@ def self_update_from_github(repo: str, branch: str, files: Optional[List[str]] =
                 data = resp.read()
         except (urllib.error.URLError, RuntimeError, TimeoutError) as exc:
             print(f"[self-update] Не удалось скачать {url}: {exc}", file=sys.stderr)
+            logger.error("[self-update] Не удалось скачать %s: %s", url, exc)
             continue
 
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -153,11 +191,18 @@ def self_update_from_github(repo: str, branch: str, files: Optional[List[str]] =
                     shutil.copy2(dest, backup_path)
                 except Exception as exc:
                     print(f"[self-update] Не удалось создать резервную копию {dest}: {exc}", file=sys.stderr)
+                    logger.error("[self-update] Не удалось создать резервную копию %s: %s", dest, exc)
             os.replace(tmp_path, dest)
             updated.append(rel_path)
+            logger.info("[self-update] Обновлён файл %s", rel_path)
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+    if updated:
+        logger.info("[self-update] Обновление завершено. Файлы: %s", ", ".join(updated))
+    else:
+        logger.warning("[self-update] Не удалось обновить ни один файл")
 
     return updated
 
@@ -177,9 +222,10 @@ class NigilBot:
     Discord-бот с единственным “живым постом” (LSP), который всегда редактируется.
     Сортировка систем, комментарии, единый список: Доступно/КД/Лимит.
     """
-    def __init__(self, cfg: dict, log_fn=print):
+    def __init__(self, cfg: dict, log_fn=None, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
-        self.log = log_fn
+        self.logger = logger or logging.getLogger("nigil_status")
+        self.log = log_fn or self.logger.info
 
         self.MSK_TZ = tz.gettz(cfg.get("timezone", "Europe/Moscow"))
         self.WEEKLY_LIMIT = int(cfg.get("weekly_limit", 3))
@@ -411,7 +457,7 @@ class NigilBot:
             try:
                 await self.init_db()
                 await bot.tree.sync()
-                self.log(f"[READY] Вошёл как {bot.user} (id: {bot.user.id})")
+                self.logger.info("[READY] Вошёл как %s (id: %s)", bot.user, getattr(bot.user, "id", "?"))
                 bot.add_view(self.StatsView(self))
 
                 for guild in bot.guilds:
@@ -431,8 +477,8 @@ class NigilBot:
                     self.periodic_tick,
                     IntervalTrigger(minutes=1, timezone=self.cfg.get("timezone", "Europe/Moscow"))
                 )
-            except Exception as e:
-                self.log(f"[ERROR on_ready] {e}")
+            except Exception:
+                self.logger.exception("[ERROR on_ready]")
 
         # -------- autocomplete --------
         async def systems_autocomplete(interaction: discord.Interaction, current: str):
@@ -451,6 +497,7 @@ class NigilBot:
             @app_commands.command(name="add", description="Добавить систему")
             async def add(self, interaction: discord.Interaction, name: str):
                 await interaction.response.defer(ephemeral=True)
+                self.outer.logger.info("[command:/systems add] user=%s guild=%s name=%s", interaction.user.id, interaction.guild_id, name)
                 ok = await self.outer.repo.add_system(interaction.guild_id, name)
                 await self.outer.refresh_live_post(interaction.guild)
                 await interaction.followup.send("✅ добавлена" if ok else "⚠️ уже есть", ephemeral=True)
@@ -459,6 +506,7 @@ class NigilBot:
             @app_commands.autocomplete(name=systems_autocomplete)
             async def remove(self, interaction: discord.Interaction, name: str):
                 await interaction.response.defer(ephemeral=True)
+                self.outer.logger.info("[command:/systems remove] user=%s guild=%s name=%s", interaction.user.id, interaction.guild_id, name)
                 ok = await self.outer.repo.remove_system(interaction.guild_id, name)
                 await self.outer.refresh_live_post(interaction.guild)
                 await interaction.followup.send("🗑️ удалена" if ok else "❌ не найдена", ephemeral=True)
@@ -466,6 +514,7 @@ class NigilBot:
             @app_commands.command(name="list", description="Список систем (с порядком)")
             async def list_(self, interaction: discord.Interaction):
                 await interaction.response.defer(ephemeral=True)
+                self.outer.logger.info("[command:/systems list] user=%s guild=%s", interaction.user.id, interaction.guild_id)
                 lst = await self.outer.repo.list_systems_with_meta(interaction.guild_id)
                 if not lst:
                     await interaction.followup.send("Список пуст. `/systems add <имя>`.", ephemeral=True); return
@@ -478,6 +527,7 @@ class NigilBot:
             @app_commands.autocomplete(name=systems_autocomplete)
             async def comment(self, interaction: discord.Interaction, name: str, text: str):
                 await interaction.response.defer(ephemeral=True)
+                self.outer.logger.info("[command:/systems comment] user=%s guild=%s name=%s", interaction.user.id, interaction.guild_id, name)
                 ok = await self.outer.repo.set_comment(interaction.guild_id, name, text)
                 await self.outer.refresh_live_post(interaction.guild)
                 await interaction.followup.send("💬 комментарий обновлён" if ok else "❌ система не найдена", ephemeral=True)
@@ -486,6 +536,7 @@ class NigilBot:
             @app_commands.autocomplete(name=systems_autocomplete)
             async def comment_clear(self, interaction: discord.Interaction, name: str):
                 await interaction.response.defer(ephemeral=True)
+                self.outer.logger.info("[command:/systems comment_clear] user=%s guild=%s name=%s", interaction.user.id, interaction.guild_id, name)
                 ok = await self.outer.repo.set_comment(interaction.guild_id, name, "")
                 await self.outer.refresh_live_post(interaction.guild)
                 await interaction.followup.send("🧹 комментарий удалён" if ok else "❌ система не найдена", ephemeral=True)
@@ -497,6 +548,7 @@ class NigilBot:
         @app_commands.autocomplete(name=systems_autocomplete)
         async def systems_move(interaction: discord.Interaction, name: str, pos: int):
             await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/systems_move] user=%s guild=%s name=%s pos=%s", interaction.user.id, interaction.guild_id, name, pos)
             ok = await self.repo.move_to_position(interaction.guild_id, name, pos)
             await self.refresh_live_post(interaction.guild)
             await interaction.followup.send("↕️ поставлено на позицию" if ok else "❌ не удалось", ephemeral=True)
@@ -506,6 +558,7 @@ class NigilBot:
         @app_commands.autocomplete(name=systems_autocomplete)
         async def systems_comment(interaction: discord.Interaction, name: str, text: str):
             await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/systems_comment] user=%s guild=%s name=%s", interaction.user.id, interaction.guild_id, name)
             ok = await self.repo.set_comment(interaction.guild_id, name, text)
             await self.refresh_live_post(interaction.guild)
             await interaction.followup.send("💬 комментарий обновлён" if ok else "❌ система не найдена", ephemeral=True)
@@ -518,6 +571,7 @@ class NigilBot:
             ttl = self.CMD_REPLY_TTL
             if ttl == 0:
                 await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/call] user=%s guild=%s system=%s", interaction.user.id, interaction.guild_id, system)
             all_names = await self.repo.list_systems(interaction.guild_id)
             best, fuzzy = self.find_best_system(system, all_names)
             if not best:
@@ -526,8 +580,10 @@ class NigilBot:
                     await interaction.followup.send(msg, ephemeral=True)
                 else:
                     await interaction.response.send_message(msg, ephemeral=False)
-                    try: await (await interaction.original_response()).delete(delay=ttl)
-                    except: pass
+                    try:
+                        await (await interaction.original_response()).delete(delay=ttl)
+                    except Exception:
+                        self.logger.exception("[command:/call] Не удалось удалить ответ")
                 return
             msg, _ok = await self.register_call(interaction.guild_id, best, interaction.user.id)
             if fuzzy: msg = f"(опечатка исправлена на **{best}**) " + msg
@@ -535,8 +591,10 @@ class NigilBot:
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=False)
-                try: await (await interaction.original_response()).delete(delay=ttl)
-                except: pass
+                try:
+                    await (await interaction.original_response()).delete(delay=ttl)
+                except Exception:
+                    self.logger.exception("[command:/call] Не удалось удалить ответ")
             await self.refresh_live_post(interaction.guild)
         bot.tree.add_command(call_cmd)
 
@@ -546,6 +604,7 @@ class NigilBot:
             ttl = self.CMD_REPLY_TTL
             if ttl == 0:
                 await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/undo] user=%s guild=%s system=%s", interaction.user.id, interaction.guild_id, system)
             all_names = await self.repo.list_systems(interaction.guild_id)
             best, fuzzy = self.find_best_system(system, all_names)
             if not best:
@@ -554,8 +613,10 @@ class NigilBot:
                     await interaction.followup.send(msg, ephemeral=True)
                 else:
                     await interaction.response.send_message(msg, ephemeral=False)
-                    try: await (await interaction.original_response()).delete(delay=ttl)
-                    except: pass
+                    try:
+                        await (await interaction.original_response()).delete(delay=ttl)
+                    except Exception:
+                        self.logger.exception("[command:/undo] Не удалось удалить ответ")
                 return
             msg = await self.undo_last(interaction.guild_id, best)
             if fuzzy and "не найдена" not in msg:
@@ -564,8 +625,10 @@ class NigilBot:
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=False)
-                try: await (await interaction.original_response()).delete(delay=ttl)
-                except: pass
+                try:
+                    await (await interaction.original_response()).delete(delay=ttl)
+                except Exception:
+                    self.logger.exception("[command:/undo] Не удалось удалить ответ")
             await self.refresh_live_post(interaction.guild)
         bot.tree.add_command(undo_cmd)
 
@@ -575,6 +638,7 @@ class NigilBot:
             ttl = self.CMD_REPLY_TTL
             if ttl == 0:
                 await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/status] user=%s guild=%s system=%s", interaction.user.id, interaction.guild_id, system)
 
             if system:
                 all_names = await self.repo.list_systems(interaction.guild_id)
@@ -585,8 +649,10 @@ class NigilBot:
                         await interaction.followup.send(msg, ephemeral=True)
                     else:
                         await interaction.response.send_message(msg, ephemeral=False)
-                        try: await (await interaction.original_response()).delete(delay=ttl)
-                        except: pass
+                        try:
+                            await (await interaction.original_response()).delete(delay=ttl)
+                        except Exception:
+                            self.logger.exception("[command:/status] Не удалось удалить ответ")
                     return
                 msg, _ = await self.system_status(interaction.guild_id, best)
                 if fuzzy:
@@ -625,8 +691,10 @@ class NigilBot:
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=False)
-                try: await (await interaction.original_response()).delete(delay=ttl)
-                except: pass
+                try:
+                    await (await interaction.original_response()).delete(delay=ttl)
+                except Exception:
+                    self.logger.exception("[command:/status] Не удалось удалить ответ")
 
             await self.refresh_live_post(interaction.guild)
         bot.tree.add_command(status_cmd)
@@ -634,6 +702,7 @@ class NigilBot:
         @app_commands.command(name="stats", description="Статистика за текущую и прошлую недели")
         async def stats_cmd(interaction: discord.Interaction):
             await interaction.response.defer(ephemeral=True)
+            self.logger.info("[command:/stats] user=%s guild=%s", interaction.user.id, interaction.guild_id)
             text = await self.build_two_weeks_stats_text(interaction.guild)
             await interaction.followup.send(text, ephemeral=True)
         bot.tree.add_command(stats_cmd)
@@ -645,26 +714,33 @@ class NigilBot:
                 return
             if message.channel.id == self.CHANNEL_ID:
                 if not message.author.bot:
+                    self.logger.info("[event:on_message] guild=%s user=%s content=%s", message.guild.id, message.author.id, message.content)
                     text = message.content.strip().upper()
                     if self.SYSTEM_NAME_RE.fullmatch(text):
                         all_names = await self.repo.list_systems(message.guild.id)
                         best, _ = self.find_best_system(text, all_names)
                         if best:
                             _, ok = await self.register_call(message.guild.id, best, message.author.id)
-                            try: await message.add_reaction("✅" if ok else "⛔")
-                            except: pass
+                            try:
+                                await message.add_reaction("✅" if ok else "⛔")
+                            except Exception:
+                                self.logger.exception("[event:on_message] Не удалось поставить реакцию подтверждения")
                             await self.refresh_live_post(message.guild)
                         else:
-                            try: await message.add_reaction("❓")
-                            except: pass
+                            try:
+                                await message.add_reaction("❓")
+                            except Exception:
+                                self.logger.exception("[event:on_message] Не удалось поставить реакцию вопроса")
                     seconds = max(1, int(self.AUTO_CLEAN or 10))
                     asyncio.create_task(self.schedule_cleanup(message.channel, user_msg=message, bot_msg=None, seconds=seconds))
             await bot.process_commands(message)
 
     # ---------- Domain logic ----------
     async def system_status(self, guild_id: int, name: str) -> Tuple[str, bool]:
+        self.logger.info("[system_status] guild=%s name=%s", guild_id, name)
         sid = await self.repo.get_system_id(guild_id, name)
         if not sid:
+            self.logger.warning("[system_status] Система %s не найдена для guild=%s", name, guild_id)
             return f"Система **{name.upper()}** не найдена в списке.", False
         anchor = self.week_reset_anchor()
         used = await self.repo.count_calls_in_week(sid, anchor)
@@ -681,49 +757,62 @@ class NigilBot:
             rem = self.human_delta_minutes(ready - now)
             lines = [f"**КД:** {icons} {name.upper()} — в {self.fmt_dt(ready)} (осталось {rem})",
                      f"• Последний вызов: {self.fmt_dt(last_call) if last_call else '—'}"]
+            self.logger.info("[system_status] КД активно для %s (guild=%s)", name, guild_id)
             return "\n".join(lines), False
         else:
             lines = [f"**Доступно:** {icons} {name.upper()}",
                      f"• Последний вызов: {self.fmt_dt(last_call) if last_call else '—'}"]
+            self.logger.info("[system_status] Доступно для %s (guild=%s)", name, guild_id)
             return "\n".join(lines), True
 
     async def register_call(self, guild_id: int, name: str, user_id: int) -> Tuple[str, bool]:
+        self.logger.info("[register_call] guild=%s name=%s user=%s", guild_id, name, user_id)
         sid = await self.repo.get_system_id(guild_id, name)
         if not sid:
+            self.logger.warning("[register_call] Система %s не найдена (guild=%s)", name, guild_id)
             return f"Система **{name.upper()}** не найдена. Добавьте её через `/systems add {name.upper()}`.", False
         anchor = self.week_reset_anchor()
         used = await self.repo.count_calls_in_week(sid, anchor)
         if used >= self.WEEKLY_LIMIT:
+            self.logger.info("[register_call] Лимит исчерпан для %s (guild=%s)", name, guild_id)
             return f"⛔ Лимит исчерпан на эту неделю для **{name.upper()}**.", False
         _, last_call = await self.repo.get_state(sid)
         if last_call:
             ready = last_call + timedelta(hours=self.COOLDOWN_HOURS)
             if self.now_utc() < ready:
+                self.logger.info("[register_call] Кулдаун активен для %s (guild=%s)", name, guild_id)
                 return (f"⛔ Рано: по **{name.upper()}** кулдаун ещё **{self.human_delta_minutes(ready - self.now_utc())}** "
                         f"(до {self.fmt_dt(ready)}).", False)
         ts = self.now_utc()
         await self.repo.add_call(sid, user_id, ts)
         await self.repo.set_state(sid, weekly_count=used + 1, last_call_ts=ts)
+        self.logger.info("[register_call] Вызов записан для %s (guild=%s, user=%s)", name, guild_id, user_id)
         return f"✅ Записал вызов по **{name.upper()}** от <@{user_id}> в {self.fmt_dt(ts)}.", True
 
     async def undo_last(self, guild_id: int, name: str) -> str:
+        self.logger.info("[undo_last] guild=%s name=%s", guild_id, name)
         sid = await self.repo.get_system_id(guild_id, name)
         if not sid:
+            self.logger.warning("[undo_last] Система %s не найдена (guild=%s)", name, guild_id)
             return f"Система **{name.upper()}** не найдена."
         popped = await self.repo.pop_last_call(sid)
         if not popped:
+            self.logger.info("[undo_last] Нет записей для %s (guild=%s)", name, guild_id)
             return f"По **{name.upper()}** нет записанных вызовов."
         _, user_id, ts = popped
         anchor = self.week_reset_anchor()
         used = await self.repo.count_calls_in_week(sid, anchor)
         last = await self.repo.last_call(sid)
         await self.repo.set_state(sid, weekly_count=used, last_call_ts=last)
+        self.logger.info("[undo_last] Отмена вызова %s (guild=%s, user=%s)", name, guild_id, user_id)
         return f"↩️ Отменил последний вызов по **{name.upper()}** (был от <@{user_id}> в {self.fmt_dt(ts)})."
 
     # ---------- Live Status Post ----------
     async def ensure_live_post(self, guild: discord.Guild) -> Optional[discord.Message]:
+        self.logger.info("[ensure_live_post] guild=%s", getattr(guild, "id", "?"))
         channel = guild.get_channel(self.CHANNEL_ID)
         if not isinstance(channel, discord.TextChannel):
+            self.logger.warning("[ensure_live_post] Канал %s не текстовый", self.CHANNEL_ID)
             return None
         st = await self.repo.get_settings(guild.id)
         msg_id = st.get("status_message_id")
@@ -733,48 +822,60 @@ class NigilBot:
             try:
                 msg = await channel.fetch_message(msg_id)
                 await msg.edit(embeds=embeds, view=view)
+                self.logger.info("[ensure_live_post] Обновлён существующий пост %s", msg_id)
                 return msg
             except discord.NotFound:
+                self.logger.warning("[ensure_live_post] Пост %s не найден, создаём заново", msg_id)
                 pass
         msg = await channel.send(embeds=embeds, view=view)
         if self.PIN_STATUS:
-            try: await msg.pin(reason="Живой статус-пост")
-            except Exception: pass
+            try:
+                await msg.pin(reason="Живой статус-пост")
+            except Exception:
+                self.logger.exception("[ensure_live_post] Не удалось закрепить сообщение %s", msg.id)
         await self.repo.set_status_message(guild.id, msg.id, self.week_reset_anchor())
+        self.logger.info("[ensure_live_post] Создан новый пост %s", msg.id)
         return msg
 
     async def refresh_live_post(self, guild: discord.Guild):
+        self.logger.info("[refresh_live_post] guild=%s", getattr(guild, "id", "?"))
         channel = guild.get_channel(self.CHANNEL_ID)
         if not isinstance(channel, discord.TextChannel):
+            self.logger.warning("[refresh_live_post] Канал %s не текстовый", self.CHANNEL_ID)
             return
         st = await self.repo.get_settings(guild.id)
         msg_id = st.get("status_message_id")
         embeds = await self.build_status_embeds(guild)
         view = self.StatsView(self)
         if not msg_id:
+            self.logger.info("[refresh_live_post] Нет сохранённого сообщения, создаём заново")
             await self.ensure_live_post(guild); return
         try:
             msg = await channel.fetch_message(msg_id)
             await msg.edit(embeds=embeds, view=view)
+            self.logger.info("[refresh_live_post] Сообщение %s обновлено", msg_id)
         except discord.NotFound:
+            self.logger.warning("[refresh_live_post] Сообщение %s не найдено, создаём заново", msg_id)
             await self.ensure_live_post(guild)
 
     async def schedule_cleanup(self, channel: discord.TextChannel, user_msg: Optional[discord.Message], bot_msg: Optional[discord.Message], seconds: int):
         if seconds <= 0:
             return
+        self.logger.info("[schedule_cleanup] Запланирована очистка через %s сек", seconds)
         await asyncio.sleep(seconds)
         try:
             if user_msg and channel.permissions_for(channel.guild.me).manage_messages:
                 await user_msg.delete()
         except Exception:
-            pass
+            self.logger.exception("[schedule_cleanup] Ошибка при удалении сообщения пользователя")
         try:
             if bot_msg:
                 await bot_msg.delete()
         except Exception:
-            pass
+            self.logger.exception("[schedule_cleanup] Ошибка при удалении сообщения бота")
 
     async def weekly_rollover(self):
+        self.logger.info("[weekly_rollover] Обновление для всех гильдий")
         for guild in self.bot.guilds:
             await self.refresh_live_post(guild)
 
@@ -828,19 +929,25 @@ class NigilBot:
 
     # ---------- Start / Stop ----------
     async def run_forever(self, token: str):
+        self.logger.info("[run_forever] Старт Discord клиента")
         os.environ["DISCORD_TOKEN"] = token
         try:
             await self.bot.start(token)
+        except Exception:
+            self.logger.exception("[run_forever] Ошибка при работе Discord клиента")
+            raise
         finally:
             if self.sched.running:
                 self.sched.shutdown(wait=False)
             if not self.bot.is_closed():
                 await self.bot.close()
+            self.logger.info("[run_forever] Discord клиент остановлен")
 
 # ---------- Repo ----------
 class Repo:
     def __init__(self, db: aiosqlite.Connection):
         self.db = db
+        self.logger = logging.getLogger("nigil_status")
 
     async def get_settings(self, guild_id: int) -> Dict:
         cur = await self.db.execute(
@@ -862,6 +969,7 @@ class Repo:
                 "auto_clean_seconds": row[7] if row[7] is not None else 0}
 
     async def set_status_channel(self, guild_id: int, channel_id: int):
+        self.logger.info("[repo] Установка status_channel: guild=%s channel=%s", guild_id, channel_id)
         await self.db.execute(
             "INSERT INTO guild_settings (guild_id, status_channel_id) VALUES (?, ?) "
             "ON CONFLICT(guild_id) DO UPDATE SET status_channel_id = excluded.status_channel_id",
@@ -870,6 +978,7 @@ class Repo:
         await self.db.commit()
 
     async def set_input_channel(self, guild_id: int, channel_id: int):
+        self.logger.info("[repo] Установка input_channel: guild=%s channel=%s", guild_id, channel_id)
         await self.db.execute(
             "INSERT INTO guild_settings (guild_id, input_channel_id) VALUES (?, ?) "
             "ON CONFLICT(guild_id) DO UPDATE SET input_channel_id = excluded.input_channel_id",
@@ -878,6 +987,7 @@ class Repo:
         await self.db.commit()
 
     async def set_status_message(self, guild_id: int, message_id: Optional[int], week_anchor: Optional[datetime]):
+        self.logger.info("[repo] Обновление status_message: guild=%s message=%s", guild_id, message_id)
         anchor_str = week_anchor.astimezone(tz.UTC).isoformat() if week_anchor else None
         await self.db.execute(
             "UPDATE guild_settings SET status_message_id = ?, status_week_anchor = ? WHERE guild_id = ?",
@@ -901,14 +1011,17 @@ class Repo:
             sid = (await cur.fetchone())[0]; await cur.close()
             await self.db.execute("INSERT OR IGNORE INTO system_state (system_id) VALUES (?)", (sid,))
             await self.db.commit()
+            self.logger.info("[repo] Добавлена система %s (guild=%s)", name_u, guild_id)
             return True
         except aiosqlite.IntegrityError:
+            self.logger.warning("[repo] Система %s уже существует (guild=%s)", name.upper(), guild_id)
             return False
 
     async def remove_system(self, guild_id: int, name: str) -> bool:
         cur = await self.db.execute("SELECT id FROM systems WHERE guild_id = ? AND name = ?", (guild_id, name.upper()))
         row = await cur.fetchone(); await cur.close()
         if not row:
+            self.logger.warning("[repo] Попытка удалить отсутствующую систему %s (guild=%s)", name.upper(), guild_id)
             return False
         sid = row[0]
         await self.db.execute("DELETE FROM calls WHERE system_id = ?", (sid,))
@@ -917,6 +1030,7 @@ class Repo:
         await self.db.commit()
         # после удаления — нормализовать позиции
         await self.compact_positions(guild_id)
+        self.logger.info("[repo] Удалена система %s (guild=%s)", name.upper(), guild_id)
         return True
 
     async def compact_positions(self, guild_id: int):
@@ -960,8 +1074,10 @@ class Repo:
             (system_id, weekly_count, ts_str)
         )
         await self.db.commit()
+        self.logger.info("[repo] Обновлён state системы: system=%s weekly_count=%s", system_id, weekly_count)
 
     async def add_call(self, system_id: int, user_id: int, when: datetime):
+        self.logger.info("[repo] Добавление вызова: system=%s user=%s", system_id, user_id)
         await self.db.execute(
             "INSERT INTO calls (system_id, user_id, ts) VALUES (?, ?, ?)",
             (system_id, user_id, when.astimezone(tz.UTC).isoformat())
@@ -977,12 +1093,14 @@ class Repo:
         return parse_iso(row[0]) if row else None
 
     async def pop_last_call(self, system_id: int) -> Optional[Tuple[int, int, datetime]]:
+        self.logger.info("[repo] Отмена последнего вызова для system=%s", system_id)
         cur = await self.db.execute(
             "SELECT id, user_id, ts FROM calls WHERE system_id = ? ORDER BY ts DESC LIMIT 1",
             (system_id,)
         )
         row = await cur.fetchone(); await cur.close()
         if not row:
+            self.logger.info("[repo] Нет вызовов для system=%s", system_id)
             return None
         call_id, user_id, ts = row[0], row[1], parse_iso(row[2])
         await self.db.execute("DELETE FROM calls WHERE id = ?", (call_id,))
@@ -1031,6 +1149,10 @@ class Repo:
         cur = await self.db.execute("UPDATE systems SET comment = ? WHERE guild_id = ? AND name = ?",
                                     (text, guild_id, name.upper()))
         await self.db.commit()
+        if cur.rowcount:
+            self.logger.info("[repo] Обновлён комментарий системы %s (guild=%s)", name.upper(), guild_id)
+        else:
+            self.logger.warning("[repo] Не удалось обновить комментарий системы %s (guild=%s)", name.upper(), guild_id)
         return cur.rowcount > 0
 
     # ------ Перемещение систем ------
@@ -1072,6 +1194,7 @@ class Repo:
         for i, sid in enumerate(ids, start=1):
             await self.db.execute("UPDATE systems SET position = ? WHERE id = ?", (i, sid))
         await self.db.commit()
+        self.logger.info("[repo] Перемещена система %s (guild=%s) на позицию %s", name.upper(), guild_id, new_idx + 1)
         return True
 
     async def move_to_position(self, guild_id: int, name: str, pos: int) -> bool:
@@ -1082,30 +1205,41 @@ class Repo:
 # =========================
 
 
-def run_bot(override_token: Optional[str]):
+def run_bot(override_token: Optional[str], logger: Optional[logging.Logger] = None):
+    logger = logger or logging.getLogger("nigil_status")
+    if not logger.handlers:
+        logger = setup_logging()
+    logger.info("[run_bot] Запуск бота")
     cfg = load_config_from_env()
     if override_token:
         cfg["token"] = override_token.strip()
 
     token = (cfg.get("token") or "").strip()
     if not token:
-        print(
-            "Токен Discord не задан. Установите переменную окружения NIGIL_TOKEN или передайте --token.",
-            file=sys.stderr,
+        msg = (
+            "Токен Discord не задан. Установите переменную окружения NIGIL_TOKEN или передайте --token."
         )
+        print(msg, file=sys.stderr)
+        logger.error("[run_bot] %s", msg)
         sys.exit(1)
 
     db_path = cfg.get("db_path", os.path.join(DATA_DIR, "nigil_monitor.sqlite3"))
     ensure_db_file_exists(db_path)
 
-    bot = NigilBot(cfg)
+    bot = NigilBot(cfg, logger=logger)
     try:
         asyncio.run(bot.run_forever(token))
     except KeyboardInterrupt:
+        logger.info("[run_bot] Остановка по запросу пользователя")
         print("Остановка по запросу пользователя.")
+    except Exception:
+        logger.exception("[run_bot] Необработанная ошибка запуска бота")
+        raise
 
 
 def main(argv: Optional[List[str]] = None):
+    logger = setup_logging()
+    logger.info("[main] Запуск с аргументами: %s", argv if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(description="Управление Discord-ботом NIGIL")
     parser.add_argument("--token", help="Переопределить токен, заданный в переменной окружения NIGIL_TOKEN")
     parser.add_argument("--self-update", action="store_true", help="Обновить файлы проекта с GitHub и выйти")
@@ -1127,6 +1261,7 @@ def main(argv: Optional[List[str]] = None):
         parser.error(f"Неизвестная команда: {command_raw!r}")
 
     if getattr(args, "self_update", False):
+        logger.info("[main] Выполняется self-update")
         files = args.update_files or None
         default_repo = args.update_repo or "NIGIL-status/NIGIL_status"
         prompt = (
@@ -1151,12 +1286,14 @@ def main(argv: Optional[List[str]] = None):
             for name in updated:
                 print(f" • {name}")
             print("[self-update] Готово. Перезапустите установку зависимостей при необходимости.")
+            logger.info("[main] Self-update завершён успешно")
             return
         print("[self-update] Не удалось обновить ни один файл.", file=sys.stderr)
+        logger.error("[main] Self-update не обновил файлы")
         sys.exit(1)
 
     override_token = getattr(args, "token", None)
-    run_bot(override_token)
+    run_bot(override_token, logger=logger)
 
 
 if __name__ == "__main__":
