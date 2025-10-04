@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$SCRIPT_SOURCE_DIR"
 PROJECT_NAME="NIGIL Discord Bot"
-PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
 SERVICE_NAME="nigil-status-bot"
 
 run_root() {
@@ -15,6 +15,184 @@ run_root() {
 }
 
 printf '\n=== Установщик %s ===\n\n' "$PROJECT_NAME"
+
+echo "Шаг 1. Настройка параметров бота."
+
+prompt_required() {
+  local prompt="$1"
+  local value
+  while true; do
+    read -rp "$prompt: " value
+    value="${value//[$'\r\n']}"
+    if [ -n "$value" ]; then
+      printf '%s' "$value"
+      return
+    fi
+    echo "Значение обязательно. Повторите ввод."
+  done
+}
+
+prompt_with_default() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  read -rp "$prompt [$default]: " value
+  value="${value//[$'\r\n']}"
+  if [ -z "$value" ]; then
+    printf '%s' "$default"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+prompt_int() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  while true; do
+    value="$(prompt_with_default "$prompt" "$default")"
+    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+      printf '%s' "$value"
+      return
+    fi
+    echo "Введите целое число."
+  done
+}
+
+prompt_float() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  while true; do
+    value="$(prompt_with_default "$prompt" "$default")"
+    value="${value/,/.}"
+    if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+      printf '%s' "$value"
+      return
+    fi
+    echo "Введите число."
+  done
+}
+
+prompt_bool() {
+  local prompt="$1"
+  local default="$2"
+  local hint
+  if [ "$default" = "true" ]; then
+    hint="Y/n"
+  else
+    hint="y/N"
+  fi
+  local value
+  while true; do
+    read -rp "$prompt [$hint]: " value
+    value="${value//[$'\r\n']}"
+    if [ -z "$value" ]; then
+      printf '%s' "$default"
+      return
+    fi
+    case "${value,,}" in
+      y|yes|д|да|true|1) printf 'true'; return ;;
+      n|no|н|нет|false|0) printf 'false'; return ;;
+    esac
+    echo "Введите y/n или да/нет."
+  done
+}
+
+DEFAULT_CHANNEL_ID=1375890545364172981
+ORIGINAL_DEFAULT_DB_PATH="$SCRIPT_DIR/nigil_monitor.sqlite3"
+DEFAULT_WEEKLY_LIMIT=3
+DEFAULT_COOLDOWN=20
+DEFAULT_NOTIFY_MIN=60
+DEFAULT_AUTO_CLEAN=10
+DEFAULT_FUZZY=0.72
+DEFAULT_SYSTEM_REGEX='^[A-Za-z0-9\-]{2,12}$'
+DEFAULT_TIMEZONE="Europe/Moscow"
+DEFAULT_PIN_STATUS=true
+DEFAULT_LIVE_POST=true
+DEFAULT_TTL=0
+
+echo "Введите параметры бота (значения по умолчанию можно принять клавишей Enter)."
+
+BOT_TOKEN="$(prompt_required "Discord-токен бота")"
+CHANNEL_ID="$(prompt_int "ID канала для уведомлений" "$DEFAULT_CHANNEL_ID")"
+DB_PATH="$(prompt_with_default "Путь к файлу базы данных" "$ORIGINAL_DEFAULT_DB_PATH")"
+WEEKLY_LIMIT="$(prompt_int "Лимит вызовов в неделю" "$DEFAULT_WEEKLY_LIMIT")"
+COOLDOWN_HOURS="$(prompt_int "Кулдаун между вызовами (часы)" "$DEFAULT_COOLDOWN")"
+NOTIFY_MIN="$(prompt_int "Период уведомлений (минуты)" "$DEFAULT_NOTIFY_MIN")"
+AUTO_CLEAN="$(prompt_int "Авто-очистка сообщений (секунды)" "$DEFAULT_AUTO_CLEAN")"
+FUZZY_CUTOFF="$(prompt_float "Минимальный рейтинг fuzzy-сопоставления" "$DEFAULT_FUZZY")"
+SYSTEM_REGEX="$(prompt_with_default "Регулярное выражение для имён систем" "$DEFAULT_SYSTEM_REGEX")"
+TIMEZONE="$(prompt_with_default "Таймзона" "$DEFAULT_TIMEZONE")"
+PIN_STATUS="$(prompt_bool "Закреплять статусное сообщение" "$DEFAULT_PIN_STATUS")"
+LIVE_POST="$(prompt_bool "Использовать только живой пост" "$DEFAULT_LIVE_POST")"
+COMMAND_TTL="$(prompt_int "TTL ответов на команды (секунды)" "$DEFAULT_TTL")"
+
+echo
+
+echo "Шаг 2. Загрузка исходного кода."
+
+if command -v git >/dev/null 2>&1; then
+  DEFAULT_REPO_URL="$(git -C "$SCRIPT_DIR" config --get remote.origin.url 2>/dev/null || echo 'https://github.com/NIGIL-status/NIGIL_status.git')"
+else
+  DEFAULT_REPO_URL="https://github.com/NIGIL-status/NIGIL_status.git"
+fi
+read -rp "Ссылка на GitHub-репозиторий [$DEFAULT_REPO_URL]: " REPO_URL
+REPO_URL="${REPO_URL:-$DEFAULT_REPO_URL}"
+
+DEFAULT_INSTALL_DIR="$SCRIPT_DIR"
+read -rp "Каталог установки [$DEFAULT_INSTALL_DIR]: " INSTALL_DIR_INPUT
+INSTALL_DIR_INPUT="${INSTALL_DIR_INPUT:-$DEFAULT_INSTALL_DIR}"
+if command -v readlink >/dev/null 2>&1; then
+  INSTALL_DIR="$(readlink -m "$INSTALL_DIR_INPUT")"
+else
+  case "$INSTALL_DIR_INPUT" in
+    /*) INSTALL_DIR="$INSTALL_DIR_INPUT" ;;
+    *) INSTALL_DIR="$(pwd)/$INSTALL_DIR_INPUT" ;;
+  esac
+fi
+
+if [ "$DB_PATH" = "$ORIGINAL_DEFAULT_DB_PATH" ]; then
+  DB_PATH="$INSTALL_DIR/nigil_monitor.sqlite3"
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Устанавливаю git (потребуется sudo)..."
+    run_root apt-get update
+    run_root apt-get install -y git
+  else
+    echo "[Ошибка] git не найден и не удалось автоматически установить." >&2
+    exit 1
+  fi
+fi
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+  echo "Обновляю существующий репозиторий в $INSTALL_DIR..."
+  git -C "$INSTALL_DIR" fetch --all --tags
+  if ! git -C "$INSTALL_DIR" pull --ff-only; then
+    echo "[Предупреждение] Не удалось выполнить git pull в $INSTALL_DIR. Проверьте локальные изменения." >&2
+  fi
+elif [ -e "$INSTALL_DIR" ] && [ "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
+  echo "[Ошибка] Каталог $INSTALL_DIR уже существует и не является репозиторием Git." >&2
+  exit 1
+else
+  echo "Клонирую репозиторий из $REPO_URL в $INSTALL_DIR..."
+  if ! mkdir -p "$INSTALL_DIR"; then
+    echo "[Ошибка] Не удалось создать каталог $INSTALL_DIR. Запустите скрипт с правами, позволяющими запись." >&2
+    exit 1
+  fi
+  git clone "$REPO_URL" "$INSTALL_DIR"
+fi
+
+SCRIPT_DIR="$INSTALL_DIR"
+cd "$SCRIPT_DIR"
+
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+
+echo
+
+echo "Шаг 3. Установка зависимостей."
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[Ошибка] Python 3 не найден. Установите его командой: sudo apt-get install -y python3 python3-venv python3-pip" >&2
@@ -41,8 +219,6 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
     exit 1
   fi
 fi
-
-cd "$SCRIPT_DIR"
 
 normalize_requirements_url() {
   local input="$1"
@@ -132,117 +308,9 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-DEFAULT_CHANNEL_ID=1375890545364172981
-DEFAULT_DB_PATH="$SCRIPT_DIR/nigil_monitor.sqlite3"
-DEFAULT_WEEKLY_LIMIT=3
-DEFAULT_COOLDOWN=20
-DEFAULT_NOTIFY_MIN=60
-DEFAULT_AUTO_CLEAN=10
-DEFAULT_FUZZY=0.72
-DEFAULT_SYSTEM_REGEX='^[A-Za-z0-9\-]{2,12}$'
-DEFAULT_TIMEZONE="Europe/Moscow"
-DEFAULT_PIN_STATUS=true
-DEFAULT_LIVE_POST=true
-DEFAULT_TTL=0
-
-prompt_required() {
-  local prompt="$1"
-  local value
-  while true; do
-    read -rp "$prompt: " value
-    value="${value//[$'\r\n']}"
-    if [ -n "$value" ]; then
-      printf '%s' "$value"
-      return
-    fi
-    echo "Значение обязательно. Повторите ввод."
-  done
-}
-
-prompt_with_default() {
-  local prompt="$1"
-  local default="$2"
-  local value
-  read -rp "$prompt [$default]: " value
-  value="${value//[$'\r\n']}"
-  if [ -z "$value" ]; then
-    printf '%s' "$default"
-  else
-    printf '%s' "$value"
-  fi
-}
-
-prompt_int() {
-  local prompt="$1"
-  local default="$2"
-  local value
-  while true; do
-    value="$(prompt_with_default "$prompt" "$default")"
-    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
-      printf '%s' "$value"
-      return
-    fi
-    echo "Введите целое число."
-  done
-}
-
-prompt_float() {
-  local prompt="$1"
-  local default="$2"
-  local value
-  while true; do
-    value="$(prompt_with_default "$prompt" "$default")"
-    value="${value/,/.}"
-    if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
-      printf '%s' "$value"
-      return
-    fi
-    echo "Введите число."
-  done
-}
-
-prompt_bool() {
-  local prompt="$1"
-  local default="$2"
-  local hint
-  if [ "$default" = "true" ]; then
-    hint="Y/n"
-  else
-    hint="y/N"
-  fi
-  local value
-  while true; do
-    read -rp "$prompt [$hint]: " value
-    value="${value//[$'\r\n']}"
-    if [ -z "$value" ]; then
-      printf '%s' "$default"
-      return
-    fi
-    case "${value,,}" in
-      y|yes|д|да|true|1) printf 'true'; return ;;
-      n|no|н|нет|false|0) printf 'false'; return ;;
-    esac
-    echo "Введите y/n или да/нет."
-  done
-}
-
-echo "Введите параметры бота (значения по умолчанию можно принять клавишей Enter)."
-
-BOT_TOKEN="$(prompt_required "Discord-токен бота")"
-CHANNEL_ID="$(prompt_int "ID канала для уведомлений" "$DEFAULT_CHANNEL_ID")"
-DB_PATH="$(prompt_with_default "Путь к файлу базы данных" "$DEFAULT_DB_PATH")"
-WEEKLY_LIMIT="$(prompt_int "Лимит вызовов в неделю" "$DEFAULT_WEEKLY_LIMIT")"
-COOLDOWN_HOURS="$(prompt_int "Кулдаун между вызовами (часы)" "$DEFAULT_COOLDOWN")"
-NOTIFY_MIN="$(prompt_int "Период уведомлений (минуты)" "$DEFAULT_NOTIFY_MIN")"
-AUTO_CLEAN="$(prompt_int "Авто-очистка сообщений (секунды)" "$DEFAULT_AUTO_CLEAN")"
-FUZZY_CUTOFF="$(prompt_float "Минимальный рейтинг fuzzy-сопоставления" "$DEFAULT_FUZZY")"
-SYSTEM_REGEX="$(prompt_with_default "Регулярное выражение для имён систем" "$DEFAULT_SYSTEM_REGEX")"
-TIMEZONE="$(prompt_with_default "Таймзона" "$DEFAULT_TIMEZONE")"
-PIN_STATUS="$(prompt_bool "Закреплять статусное сообщение" "$DEFAULT_PIN_STATUS")"
-LIVE_POST="$(prompt_bool "Использовать только живой пост" "$DEFAULT_LIVE_POST")"
-COMMAND_TTL="$(prompt_int "TTL ответов на команды (секунды)" "$DEFAULT_TTL")"
-
 echo
+
+echo "Шаг 4. Настройка автозапуска."
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "[Предупреждение] systemd недоступен. Пропускаю создание сервиса автозапуска." >&2
@@ -328,8 +396,7 @@ After=network.target
 Type=simple
 User=${service_user}
 WorkingDirectory=${SCRIPT_DIR}
-${UNIT_ENVIRONMENT}${EXEC_START_LINE}
-Restart=on-failure
+${UNIT_ENVIRONMENT}${EXEC_START_LINE}Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 
@@ -342,7 +409,6 @@ run_root systemctl daemon-reload
 run_root systemctl enable --now "${SERVICE_NAME}.service"
 
 cat <<MSG
-
 Готово. Сервис ${SERVICE_NAME}.service создан и запущен.
 Убедитесь, что переменные окружения в unit-файле заданы корректно.
 Проверить состояние: sudo systemctl status ${SERVICE_NAME}.service
