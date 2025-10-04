@@ -44,6 +44,30 @@ fi
 
 cd "$SCRIPT_DIR"
 
+normalize_requirements_url() {
+  local input="$1"
+
+  if [[ "$input" =~ ^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$ ]]; then
+    printf 'https://raw.githubusercontent.com/%s/%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  elif [[ "$input" =~ ^https://github\.com/([^/]+)/([^/]+)/raw/(.+)$ ]]; then
+    printf 'https://raw.githubusercontent.com/%s/%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  else
+    printf '%s\n' "$input"
+  fi
+}
+
+validate_requirements_file() {
+  local path="$1"
+
+  if grep -qiE '<!DOCTYPE html|<html' "$path"; then
+    echo "[Ошибка] Получен HTML вместо requirements.txt. Укажите raw-ссылку на файл." >&2
+    rm -f "$path"
+    return 1
+  fi
+
+  return 0
+}
+
 download_requirements() {
   local default_url="https://raw.githubusercontent.com/NIGIL-status/NIGIL_status/main/requirements.txt"
   local url="${REQUIREMENTS_URL-}"
@@ -60,13 +84,20 @@ download_requirements() {
     return 1
   fi
 
+  local normalized_url
+  normalized_url="$(normalize_requirements_url "$url")"
+  if [ "$normalized_url" != "$url" ]; then
+    echo "Обнаружена ссылка на GitHub. Использую raw-вариант: $normalized_url"
+  fi
+  url="$normalized_url"
+
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$url" -o requirements.txt; then
+    if curl -fsSL "$url" -o requirements.txt && validate_requirements_file requirements.txt; then
       echo "requirements.txt успешно скачан."
       return 0
     fi
   elif command -v wget >/dev/null 2>&1; then
-    if wget -qO requirements.txt "$url"; then
+    if wget -qO requirements.txt "$url" && validate_requirements_file requirements.txt; then
       echo "requirements.txt успешно скачан."
       return 0
     fi
