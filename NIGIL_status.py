@@ -2,6 +2,9 @@
 import sys
 import re
 import shutil
+import tempfile
+import urllib.error
+import urllib.request
 import asyncio
 import difflib
 import argparse
@@ -92,6 +95,47 @@ def ensure_db_file_exists(db_path: str, template_name: str = "nigil_monitor.sqli
         except Exception:
             # нет шаблона — таблицы создадутся миграциями при первом запуске
             pass
+
+
+def self_update_from_github(repo: str, branch: str, files: Optional[List[str]] = None) -> List[str]:
+    """Скачать свежие файлы из GitHub и перезаписать локальные."""
+    files = files or ["NIGIL_status.py", "requirements.txt", "install.sh"]
+    base_url = f"https://raw.githubusercontent.com/{repo}/{branch}/"
+    updated: List[str] = []
+    script_dir = os.path.abspath(os.path.dirname(__file__))
+
+    for rel_path in files:
+        url = base_url + rel_path
+        dest = os.path.join(script_dir, rel_path)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                data = resp.read()
+        except (urllib.error.URLError, RuntimeError, TimeoutError) as exc:
+            print(f"[self-update] Не удалось скачать {url}: {exc}", file=sys.stderr)
+            continue
+
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix="nigil-update-")
+        try:
+            with os.fdopen(tmp_fd, "wb") as tmp_file:
+                tmp_file.write(data)
+            backup_path = dest + ".bak"
+            if os.path.exists(dest):
+                try:
+                    shutil.copy2(dest, backup_path)
+                except Exception as exc:
+                    print(f"[self-update] Не удалось создать резервную копию {dest}: {exc}", file=sys.stderr)
+            os.replace(tmp_path, dest)
+            updated.append(rel_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return updated
 
 # =========================
 # ===== BOT BACKEND =======
@@ -1040,8 +1084,28 @@ def run_bot(override_token: Optional[str]):
 def main(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Управление Discord-ботом NIGIL")
     parser.add_argument("--token", help="Переопределить токен, заданный в переменной окружения NIGIL_TOKEN")
+    parser.add_argument("--self-update", action="store_true", help="Обновить файлы проекта с GitHub и выйти")
+    parser.add_argument("--update-repo", default=os.getenv("NIGIL_UPDATE_REPO", "NIGIL-status/NIGIL_status"),
+                        help="GitHub-репозиторий в формате owner/repo для self-update")
+    parser.add_argument("--update-branch", default=os.getenv("NIGIL_UPDATE_BRANCH", "main"),
+                        help="Ветка GitHub для self-update")
+    parser.add_argument("--update-files", nargs="*",
+                        help="Список файлов (относительно корня репозитория) для self-update")
 
     args = parser.parse_args(argv)
+
+    if getattr(args, "self_update", False):
+        files = args.update_files or None
+        updated = self_update_from_github(args.update_repo, args.update_branch, files)
+        if updated:
+            print("[self-update] Обновлены файлы:")
+            for name in updated:
+                print(f" • {name}")
+            print("[self-update] Готово. Перезапустите установку зависимостей при необходимости.")
+            return
+        print("[self-update] Не удалось обновить ни один файл.", file=sys.stderr)
+        sys.exit(1)
+
     override_token = getattr(args, "token", None)
     run_bot(override_token)
 
