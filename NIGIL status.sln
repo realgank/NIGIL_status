@@ -1,0 +1,23 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36109.1 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{888888A0-9F3D-457C-B088-3A5042F75D52}") = "NIGIL status", "NIGIL status.pyproj", "{367FDFCE-EDC5-4AD1-8F24-60201BD89CFF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{367FDFCE-EDC5-4AD1-8F24-60201BD89CFF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{367FDFCE-EDC5-4AD1-8F24-60201BD89CFF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {29691F6A-200A-4ADA-AD1C-E5993FD2B405}
+	EndGlobalSection
+EndGlobal
