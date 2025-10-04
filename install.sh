@@ -430,14 +430,12 @@ escape_systemd_value() {
 }
 
 escape_systemd_path() {
+  # systemd-escape --path преобразует строку в имя юнита (например, /root -> -root),
+  # что ломает WorkingDirectory. Поэтому экранируем путь вручную.
   local path="$1"
-  if [ -n "$SYSTEMD_ESCAPE_BIN" ]; then
-    "$SYSTEMD_ESCAPE_BIN" --path "$path"
-  else
-    local escaped="${path//\\/\\\\}"
-    escaped="${escaped// /\\x20}"
-    printf '%s' "$escaped"
-  fi
+  local escaped="${path//\\/\\\\}"
+  escaped="${escaped// /\\x20}"
+  printf '%s' "$escaped"
 }
 
 build_env_line() {
@@ -482,25 +480,26 @@ UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_COMMAND_REPLY_TTL" "$COMMAND_TTL")"
 
 EXEC_START_LINE="$(build_execstart_line "$PYTHON_BIN" "$SCRIPT_DIR/NIGIL_status.py")"
 
-UNIT_CONTENT="[Unit]
-Description=${PROJECT_NAME}
-After=network.target
-
-[Service]
-Type=simple
-User=${service_user}
-WorkingDirectory=$(escape_systemd_path "$SCRIPT_DIR")
-${UNIT_ENVIRONMENT}${EXEC_START_LINE}Restart=on-failure
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-"
-
 log_info "Генерирую unit-файл ${SERVICE_FILE}"
 tmp_unit_file="$(mktemp)"
-printf '%s\n' "${UNIT_CONTENT}" >"${tmp_unit_file}"
+{
+  printf '[Unit]\n'
+  printf 'Description=%s\n' "${PROJECT_NAME}"
+  printf 'After=network.target\n\n'
+
+  printf '[Service]\n'
+  printf 'Type=simple\n'
+  printf 'User=%s\n' "${service_user}"
+  printf 'WorkingDirectory=%s\n' "$(escape_systemd_path "$SCRIPT_DIR")"
+  printf '%s' "${UNIT_ENVIRONMENT}"
+  printf '%s' "${EXEC_START_LINE}"
+  printf 'Restart=on-failure\n'
+  printf 'RestartSec=10\n'
+  printf 'Environment=PYTHONUNBUFFERED=1\n\n'
+
+  printf '[Install]\n'
+  printf 'WantedBy=multi-user.target\n'
+} >"${tmp_unit_file}"
 run_root install -m 0644 "${tmp_unit_file}" "${SERVICE_FILE}"
 rm -f "${tmp_unit_file}"
 run_root systemctl daemon-reload
