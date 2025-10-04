@@ -112,21 +112,21 @@ DEFAULT_PIN_STATUS=true
 DEFAULT_LIVE_POST=true
 DEFAULT_TTL=0
 
-echo "Введите параметры бота (значения по умолчанию можно принять клавишей Enter)."
+echo "Введите токен бота. Остальные настройки будут установлены значениями по умолчанию и их можно изменить через команды в Discord."
 
 BOT_TOKEN="$(prompt_required "Discord-токен бота")"
-CHANNEL_ID="$(prompt_int "ID канала для уведомлений" "$DEFAULT_CHANNEL_ID")"
-DB_PATH="$(prompt_with_default "Путь к файлу базы данных" "$ORIGINAL_DEFAULT_DB_PATH")"
-WEEKLY_LIMIT="$(prompt_int "Лимит вызовов в неделю" "$DEFAULT_WEEKLY_LIMIT")"
-COOLDOWN_HOURS="$(prompt_int "Кулдаун между вызовами (часы)" "$DEFAULT_COOLDOWN")"
-NOTIFY_MIN="$(prompt_int "Период уведомлений (минуты)" "$DEFAULT_NOTIFY_MIN")"
-AUTO_CLEAN="$(prompt_int "Авто-очистка сообщений (секунды)" "$DEFAULT_AUTO_CLEAN")"
-FUZZY_CUTOFF="$(prompt_float "Минимальный рейтинг fuzzy-сопоставления" "$DEFAULT_FUZZY")"
-SYSTEM_REGEX="$(prompt_with_default "Регулярное выражение для имён систем" "$DEFAULT_SYSTEM_REGEX")"
-TIMEZONE="$(prompt_with_default "Таймзона" "$DEFAULT_TIMEZONE")"
-PIN_STATUS="$(prompt_bool "Закреплять статусное сообщение" "$DEFAULT_PIN_STATUS")"
-LIVE_POST="$(prompt_bool "Использовать только живой пост" "$DEFAULT_LIVE_POST")"
-COMMAND_TTL="$(prompt_int "TTL ответов на команды (секунды)" "$DEFAULT_TTL")"
+CHANNEL_ID="$DEFAULT_CHANNEL_ID"
+DB_PATH="$ORIGINAL_DEFAULT_DB_PATH"
+WEEKLY_LIMIT="$DEFAULT_WEEKLY_LIMIT"
+COOLDOWN_HOURS="$DEFAULT_COOLDOWN"
+NOTIFY_MIN="$DEFAULT_NOTIFY_MIN"
+AUTO_CLEAN="$DEFAULT_AUTO_CLEAN"
+FUZZY_CUTOFF="$DEFAULT_FUZZY"
+SYSTEM_REGEX="$DEFAULT_SYSTEM_REGEX"
+TIMEZONE="$DEFAULT_TIMEZONE"
+PIN_STATUS="$DEFAULT_PIN_STATUS"
+LIVE_POST="$DEFAULT_LIVE_POST"
+COMMAND_TTL="$DEFAULT_TTL"
 
 echo
 
