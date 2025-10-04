@@ -284,6 +284,25 @@ build_env_line() {
   printf 'Environment="%s=%s"\n' "$name" "$(escape_systemd_value "$value")"
 }
 
+build_execstart_line() {
+  local args=("$@")
+  local escaped=()
+
+  if command -v systemd-escape >/dev/null 2>&1; then
+    local arg
+    for arg in "${args[@]}"; do
+      escaped+=("$(systemd-escape --shell -- "$arg")")
+    done
+  else
+    local arg
+    for arg in "${args[@]}"; do
+      escaped+=("$(printf '%q' "$arg")")
+    done
+  fi
+
+  printf 'ExecStart=%s\n' "${escaped[*]}"
+}
+
 UNIT_ENVIRONMENT=""
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_TOKEN" "$BOT_TOKEN")"
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_CHANNEL_ID" "$CHANNEL_ID")"
@@ -299,6 +318,8 @@ UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_PIN_STATUS_MESSAGE" "$PIN_STATUS")"
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_LIVE_POST_ONLY" "$LIVE_POST")"
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_COMMAND_REPLY_TTL" "$COMMAND_TTL")"
 
+EXEC_START_LINE="$(build_execstart_line "$PYTHON_BIN" "$SCRIPT_DIR/NIGIL_status.py" run)"
+
 UNIT_CONTENT="[Unit]
 Description=${PROJECT_NAME}
 After=network.target
@@ -307,7 +328,7 @@ After=network.target
 Type=simple
 User=${service_user}
 WorkingDirectory=${SCRIPT_DIR}
-${UNIT_ENVIRONMENT}ExecStart="${PYTHON_BIN}" "${SCRIPT_DIR}/NIGIL_status.py" run
+${UNIT_ENVIRONMENT}${EXEC_START_LINE}
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
