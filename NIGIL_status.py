@@ -1,18 +1,12 @@
 ﻿import os
 import sys
-import json
 import re
 import shutil
 import asyncio
-import threading
 import difflib
+import argparse
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
-
-# ---------- GUI ----------
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from tkinter.scrolledtext import ScrolledText
 
 # ---------- Discord Bot ----------
 import discord
@@ -41,48 +35,53 @@ def resource_path(rel_path: str) -> str:
 DATA_DIR = os.path.abspath(".")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-
 # =========================
 # ===== CONFIG LOGIC ======
 # =========================
 
-DEFAULT_CONFIG = {
-    "token": "",
-    "channel_id": 1375890545364172981,
-    "db_path": os.path.join(DATA_DIR, "nigil_monitor.sqlite3"),
-    "weekly_limit": 3,
-    "cooldown_hours": 20,
-    "notify_period_min": 60,
-    "auto_clean_seconds": 10,
-    "fuzzy_cutoff": 0.72,
-    "system_name_regex": r"^[A-Za-z0-9\-]{2,12}$",
-    "timezone": "Europe/Moscow",
-    "pin_status_message": True,
-    "live_post_only": True,
-    "command_reply_ttl": 0
+ENV_CONFIG_SPEC: Dict[str, Tuple[str, object, object]] = {
+    "token": ("NIGIL_TOKEN", str, ""),
+    "channel_id": ("NIGIL_CHANNEL_ID", int, 1375890545364172981),
+    "db_path": ("NIGIL_DB_PATH", str, os.path.join(DATA_DIR, "nigil_monitor.sqlite3")),
+    "weekly_limit": ("NIGIL_WEEKLY_LIMIT", int, 3),
+    "cooldown_hours": ("NIGIL_COOLDOWN_HOURS", int, 20),
+    "notify_period_min": ("NIGIL_NOTIFY_PERIOD_MIN", int, 60),
+    "auto_clean_seconds": ("NIGIL_AUTO_CLEAN_SECONDS", int, 10),
+    "fuzzy_cutoff": ("NIGIL_FUZZY_CUTOFF", float, 0.72),
+    "system_name_regex": ("NIGIL_SYSTEM_NAME_REGEX", str, r"^[A-Za-z0-9\-]{2,12}$"),
+    "timezone": ("NIGIL_TIMEZONE", str, "Europe/Moscow"),
+    "pin_status_message": ("NIGIL_PIN_STATUS_MESSAGE", bool, True),
+    "live_post_only": ("NIGIL_LIVE_POST_ONLY", bool, True),
+    "command_reply_ttl": ("NIGIL_COMMAND_REPLY_TTL", int, 0),
 }
 
-def load_config() -> dict:
-    if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-        return dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        cfg = dict(DEFAULT_CONFIG)
-        cfg.update(data)
-        return cfg
-    except Exception as e:
-        messagebox.showerror("Ошибка конфигурации", f"Не удалось прочитать {CONFIG_FILE}:\n{e}")
-        return dict(DEFAULT_CONFIG)
 
-def save_config(cfg: dict):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        messagebox.showerror("Ошибка конфигурации", f"Не удалось записать {CONFIG_FILE}:\n{e}")
+def _parse_bool_env(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Не удалось интерпретировать '{value}' как булево значение")
+
+
+def load_config_from_env() -> dict:
+    cfg: Dict[str, object] = {}
+    for key, (env_name, converter, default) in ENV_CONFIG_SPEC.items():
+        raw = os.getenv(env_name)
+        if raw is None or raw == "":
+            value = default
+        else:
+            try:
+                if converter is bool:
+                    value = _parse_bool_env(raw)
+                else:
+                    value = converter(raw)
+            except Exception as exc:
+                print(f"[config] Переменная окружения {env_name} содержит некорректное значение: {exc}", file=sys.stderr)
+                sys.exit(1)
+        cfg[key] = value
+    return cfg
 
 def ensure_db_file_exists(db_path: str, template_name: str = "nigil_monitor.sqlite3"):
     """Если БД нет — скопировать шаблон (если упакован), иначе создать автоматически миграциями."""
@@ -133,7 +132,6 @@ class NigilBot:
         self.db: Optional[aiosqlite.Connection] = None
         self.repo: Optional["Repo"] = None
         self.sched = AsyncIOScheduler(timezone=cfg.get("timezone", "Europe/Moscow"))
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._bind_events_and_commands()
 
@@ -761,30 +759,15 @@ class NigilBot:
         return [embed]
 
     # ---------- Start / Stop ----------
-    def start(self, token: str):
-        def _run():
-            try:
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
-                self._loop.run_until_complete(self._start_async(token))
-            except Exception as e:
-                self.log(f"[FATAL] {e}")
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-
-    async def _start_async(self, token: str):
+    async def run_forever(self, token: str):
         os.environ["DISCORD_TOKEN"] = token
-        await self.bot.start(token)
-
-    async def _stop_async(self):
-        if self.sched.running:
-            self.sched.shutdown(wait=False)
-        if not self.bot.is_closed():
-            await self.bot.close()
-
-    def stop(self):
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._stop_async(), self._loop)
+        try:
+            await self.bot.start(token)
+        finally:
+            if self.sched.running:
+                self.sched.shutdown(wait=False)
+            if not self.bot.is_closed():
+                await self.bot.close()
 
 # ---------- Repo ----------
 class Repo:
@@ -1027,170 +1010,41 @@ class Repo:
         return await self.move_system(guild_id, name, "pos", pos)
 
 # =========================
-# ========= GUI ===========
+# ========= CLI ===========
 # =========================
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Нигилы-Монитор — Discord Bot (GUI)")
-        self.geometry("900x670")
 
-        self.cfg = load_config()
-        ensure_db_file_exists(self.cfg.get("db_path", os.path.join(DATA_DIR, "nigil_monitor.sqlite3")))
-        self.bot_runner: Optional[NigilBot] = None
-        self.running = False
+def run_bot(override_token: Optional[str]):
+    cfg = load_config_from_env()
+    if override_token:
+        cfg["token"] = override_token.strip()
 
-        self._build_ui()
-        self._load_config_to_ui()
+    token = (cfg.get("token") or "").strip()
+    if not token:
+        print(
+            "Токен Discord не задан. Установите переменную окружения NIGIL_TOKEN или передайте --token.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    def _build_ui(self):
-        pad = {"padx": 6, "pady": 4}
+    db_path = cfg.get("db_path", os.path.join(DATA_DIR, "nigil_monitor.sqlite3"))
+    ensure_db_file_exists(db_path)
 
-        frm = ttk.LabelFrame(self, text="Конфигурация")
-        frm.pack(fill="x", **pad)
+    bot = NigilBot(cfg)
+    try:
+        asyncio.run(bot.run_forever(token))
+    except KeyboardInterrupt:
+        print("Остановка по запросу пользователя.")
 
-        self.var_token = tk.StringVar()
-        self.var_channel = tk.StringVar()
-        self.var_db = tk.StringVar()
-        self.var_weekly = tk.StringVar()
-        self.var_cd = tk.StringVar()
-        self.var_notify = tk.StringVar()
-        self.var_clean = tk.StringVar()
-        self.var_fuzzy = tk.StringVar()
-        self.var_regex = tk.StringVar()
-        self.var_tz = tk.StringVar()
-        self.var_pin = tk.BooleanVar()
-        self.var_livepost = tk.BooleanVar()
-        self.var_cmdttl = tk.StringVar()
 
-        ttk.Label(frm, text="Токен:").grid(row=0, column=0, sticky="w")
-        self.ent_token = ttk.Entry(frm, textvariable=self.var_token, show="•", width=54)
-        self.ent_token.grid(row=0, column=1, sticky="we")
-        ttk.Button(frm, text="Вставить", command=lambda: self.ent_token.event_generate("<<Paste>>")).grid(row=0, column=2, sticky="w", padx=3)
+def main(argv: Optional[List[str]] = None):
+    parser = argparse.ArgumentParser(description="Управление Discord-ботом NIGIL")
+    parser.add_argument("--token", help="Переопределить токен, заданный в переменной окружения NIGIL_TOKEN")
 
-        ttk.Label(frm, text="ID канала:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_channel, width=20).grid(row=1, column=1, sticky="w")
+    args = parser.parse_args(argv)
+    override_token = getattr(args, "token", None)
+    run_bot(override_token)
 
-        ttk.Label(frm, text="БД:").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_db, width=54).grid(row=2, column=1, sticky="we")
-        ttk.Button(frm, text="..", width=3, command=self._choose_db).grid(row=2, column=2, sticky="w", padx=3)
-
-        ttk.Label(frm, text="Лимит/нед:").grid(row=3, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_weekly, width=10).grid(row=3, column=1, sticky="w")
-
-        ttk.Label(frm, text="Кулдаун (ч):").grid(row=4, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_cd, width=10).grid(row=4, column=1, sticky="w")
-
-        ttk.Label(frm, text="Служебные тики (мин):").grid(row=5, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_notify, width=10).grid(row=5, column=1, sticky="w")
-
-        ttk.Label(frm, text="Авто-очистка (сек):").grid(row=6, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_clean, width=10).grid(row=6, column=1, sticky="w")
-
-        ttk.Label(frm, text="Fuzzy cutoff:").grid(row=7, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_fuzzy, width=10).grid(row=7, column=1, sticky="w")
-
-        ttk.Label(frm, text="Regex системы:").grid(row=8, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_regex, width=54).grid(row=8, column=1, sticky="we")
-
-        ttk.Label(frm, text="Таймзона:").grid(row=9, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_tz, width=20).grid(row=9, column=1, sticky="w")
-        ttk.Checkbutton(frm, text="Закреплять статус", variable=self.var_pin).grid(row=9, column=2, sticky="w")
-
-        ttk.Checkbutton(frm, text="Только живой пост", variable=self.var_livepost).grid(row=10, column=1, sticky="w")
-        ttk.Label(frm, text="TTL ответов (сек):").grid(row=10, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_cmdttl, width=10).grid(row=10, column=1, sticky="e")
-
-        for i in range(3):
-            frm.grid_columnconfigure(i, weight=1)
-
-        row2 = ttk.Frame(self); row2.pack(fill="x", **pad)
-        ttk.Button(row2, text="Сохранить конфиг", command=self._save_config_from_ui).pack(side="left")
-        ttk.Button(row2, text="Старт бота", command=self._start_bot).pack(side="left", padx=5)
-        ttk.Button(row2, text="Стоп бота", command=self._stop_bot).pack(side="left", padx=5)
-        ttk.Button(row2, text="Открыть папку", command=lambda: os.startfile(os.getcwd()) if os.name == "nt" else None).pack(side="left", padx=5)
-
-        self.log_box = ScrolledText(self, height=20)
-        self.log_box.pack(fill="both", expand=True, **pad)
-        self._log("Готов. Отредактируйте конфиг и нажмите «Старт бота».")
-
-    def _choose_db(self):
-        path = filedialog.asksaveasfilename(title="Файл БД SQLite", defaultextension=".sqlite3",
-                                            filetypes=[("SQLite", "*.sqlite3 *.db"), ("All", "*.*")])
-        if path:
-            self.var_db.set(path)
-
-    def _load_config_to_ui(self):
-        self.var_token.set(self.cfg.get("token", ""))
-        self.var_channel.set(str(self.cfg.get("channel_id", "")))
-        self.var_db.set(self.cfg.get("db_path", os.path.join(DATA_DIR, "nigil_monitor.sqlite3")))
-        self.var_weekly.set(str(self.cfg.get("weekly_limit", 3)))
-        self.var_cd.set(str(self.cfg.get("cooldown_hours", 20)))
-        self.var_notify.set(str(self.cfg.get("notify_period_min", 60)))
-        self.var_clean.set(str(self.cfg.get("auto_clean_seconds", 10)))
-        self.var_fuzzy.set(str(self.cfg.get("fuzzy_cutoff", 0.72)))
-        self.var_regex.set(self.cfg.get("system_name_regex", r"^[A-Za-z0-9\-]{2,12}$"))
-        self.var_tz.set(self.cfg.get("timezone", "Europe/Moscow"))
-        self.var_pin.set(bool(self.cfg.get("pin_status_message", True)))
-        self.var_livepost.set(bool(self.cfg.get("live_post_only", True)))
-        self.var_cmdttl.set(str(self.cfg.get("command_reply_ttl", 0)))
-
-    def _save_config_from_ui(self):
-        try:
-            self.cfg["token"] = self.var_token.get().strip()
-            self.cfg["channel_id"] = int(self.var_channel.get().strip())
-            self.cfg["db_path"] = self.var_db.get().strip()
-            self.cfg["weekly_limit"] = int(self.var_weekly.get().strip())
-            self.cfg["cooldown_hours"] = int(self.var_cd.get().strip())
-            self.cfg["notify_period_min"] = int(self.var_notify.get().strip())
-            self.cfg["auto_clean_seconds"] = int(self.var_clean.get().strip())
-            self.cfg["fuzzy_cutoff"] = float(self.var_fuzzy.get().strip())
-            self.cfg["system_name_regex"] = self.var_regex.get().strip()
-            self.cfg["timezone"] = self.var_tz.get().strip()
-            self.cfg["pin_status_message"] = bool(self.var_pin.get())
-            self.cfg["live_post_only"] = bool(self.var_livepost.get())
-            self.cfg["command_reply_ttl"] = int(self.var_cmdttl.get().strip())
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Неверные значения полей:\n{e}")
-            return
-        save_config(self.cfg)
-        self._log("Конфиг сохранён.")
-
-    # ---------- BOT control ----------
-    def _start_bot(self):
-        self._save_config_from_ui()
-        if not self.cfg.get("token"):
-            messagebox.showerror("Нет токена", "Укажите токен бота.")
-            return
-        if self.running:
-            messagebox.showinfo("Уже запущен", "Бот уже запущен.")
-            return
-        self.bot_runner = NigilBot(self.cfg, log_fn=self._log)
-        self.bot_runner.start(self.cfg["token"])
-        self.running = True
-        self._log("Стартую бота… Если всё ок — появится [READY].")
-
-    def _stop_bot(self):
-        if not self.running or not self.bot_runner:
-            self._log("Бот не запущен.")
-            return
-        self.bot_runner.stop()
-        self.running = False
-        self._log("Сигнал на остановку отправлен.")
-
-    # ---------- Logging ----------
-    def _log(self, msg: str):
-        self.log_box.insert("end", msg + "\n")
-        self.log_box.see("end")
-
-# =========================
-# ========= MAIN ==========
-# =========================
 
 if __name__ == "__main__":
-    if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-    app = App()
-    app.mainloop()
-
+    main()
