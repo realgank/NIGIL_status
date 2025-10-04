@@ -414,6 +414,14 @@ log_info "Создаю systemd-сервис ${SERVICE_NAME}.service от име�
 
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
+SYSTEMD_ESCAPE_BIN="$(command -v systemd-escape || true)"
+SYSTEMD_ESCAPE_HAS_SHELL=false
+if [ -n "$SYSTEMD_ESCAPE_BIN" ]; then
+  if "$SYSTEMD_ESCAPE_BIN" --help 2>&1 | grep -q -- '--shell'; then
+    SYSTEMD_ESCAPE_HAS_SHELL=true
+  fi
+fi
+
 escape_systemd_value() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -423,8 +431,8 @@ escape_systemd_value() {
 
 escape_systemd_path() {
   local path="$1"
-  if command -v systemd-escape >/dev/null 2>&1; then
-    systemd-escape --path "$path"
+  if [ -n "$SYSTEMD_ESCAPE_BIN" ]; then
+    "$SYSTEMD_ESCAPE_BIN" --path "$path"
   else
     local escaped="${path//\\/\\\\}"
     escaped="${escaped// /\\x20}"
@@ -442,10 +450,10 @@ build_execstart_line() {
   local args=("$@")
   local escaped=()
 
-  if command -v systemd-escape >/dev/null 2>&1; then
+  if [ "$SYSTEMD_ESCAPE_HAS_SHELL" = true ]; then
     local arg
     for arg in "${args[@]}"; do
-      escaped+=("$(systemd-escape --shell -- "$arg")")
+      escaped+=("$("$SYSTEMD_ESCAPE_BIN" --shell -- "$arg")")
     done
   else
     local arg
