@@ -1115,8 +1115,16 @@ def main(argv: Optional[List[str]] = None):
                         help="Ветка GitHub для self-update")
     parser.add_argument("--update-files", nargs="*",
                         help="Список файлов (относительно корня репозитория) для self-update")
+    parser.add_argument("command", nargs="?", help="Необязательная команда (run или self-update)")
 
     args = parser.parse_args(argv)
+
+    command_raw = getattr(args, "command", None)
+    command = (command_raw or "run").strip().lower().replace("-", "_")
+    if command == "self_update":
+        setattr(args, "self_update", True)
+    elif command not in {"run"}:
+        parser.error(f"Неизвестная команда: {command_raw!r}")
 
     if getattr(args, "self_update", False):
         files = args.update_files or None

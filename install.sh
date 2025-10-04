@@ -386,7 +386,7 @@ UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_PIN_STATUS_MESSAGE" "$PIN_STATUS")"
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_LIVE_POST_ONLY" "$LIVE_POST")"
 UNIT_ENVIRONMENT+="$(build_env_line "NIGIL_COMMAND_REPLY_TTL" "$COMMAND_TTL")"
 
-EXEC_START_LINE="$(build_execstart_line "$PYTHON_BIN" "$SCRIPT_DIR/NIGIL_status.py" run)"
+EXEC_START_LINE="$(build_execstart_line "$PYTHON_BIN" "$SCRIPT_DIR/NIGIL_status.py")"
 
 UNIT_CONTENT="[Unit]
 Description=${PROJECT_NAME}
@@ -428,6 +428,6 @@ cat <<MSG
   export NIGIL_PIN_STATUS_MESSAGE='${PIN_STATUS}'
   export NIGIL_LIVE_POST_ONLY='${LIVE_POST}'
   export NIGIL_COMMAND_REPLY_TTL='${COMMAND_TTL}'
-  ${PYTHON_BIN} ${SCRIPT_DIR}/NIGIL_status.py run
+  ${PYTHON_BIN} ${SCRIPT_DIR}/NIGIL_status.py
 
 MSG
