@@ -9,6 +9,7 @@ import asyncio
 import difflib
 import argparse
 import logging
+import ast
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -95,6 +96,67 @@ def _parse_bool_env(value: str) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"Не удалось интерпретировать '{value}' как булево значение")
+
+
+def _parse_env_kv(line: str) -> Optional[Tuple[str, str]]:
+    """Разобрать строку формата KEY=VALUE из .env."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.lower().startswith("export "):
+        stripped = stripped[7:].lstrip()
+    if "=" not in stripped:
+        return None
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    if not key or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        return None
+    value = value.strip()
+    if value and not (value.startswith("\"") and value.endswith("\"")) and "#" in value:
+        value = value.split("#", 1)[0].rstrip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        try:
+            value = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            value = value[1:-1]
+    return key, value
+
+
+def load_env_file(logger: Optional[logging.Logger] = None) -> None:
+    """Загрузить переменные окружения из .env (если есть)."""
+    logger = logger or logging.getLogger("nigil_status")
+    candidates = []
+    explicit = os.getenv("NIGIL_ENV_FILE")
+    if explicit:
+        candidates.append(explicit)
+    candidates.extend([
+        os.path.join(SCRIPT_DIR, ".env"),
+        os.path.join(DATA_DIR, ".env"),
+    ])
+
+    loaded_any = False
+    seen: set[str] = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    parsed = _parse_env_kv(raw_line)
+                    if not parsed:
+                        continue
+                    key, value = parsed
+                    if key not in os.environ:
+                        os.environ[key] = value
+            logger.info("[env] Загружены переменные из %s", path)
+            loaded_any = True
+        except Exception as exc:
+            logger.warning("[env] Не удалось загрузить %s: %s", path, exc)
+    if not loaded_any and explicit:
+        logger.warning("[env] Указанный файл окружения %s не найден", explicit)
 
 
 def load_config_from_env() -> dict:
@@ -1210,6 +1272,7 @@ def run_bot(override_token: Optional[str], logger: Optional[logging.Logger] = No
     if not logger.handlers:
         logger = setup_logging()
     logger.info("[run_bot] Запуск бота")
+    load_env_file(logger)
     cfg = load_config_from_env()
     if override_token:
         cfg["token"] = override_token.strip()
