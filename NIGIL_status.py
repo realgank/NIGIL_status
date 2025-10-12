@@ -372,13 +372,16 @@ class NigilBot:
 
     # ---------- Repo / DB ----------
     async def ensure_migrations(self, db: aiosqlite.Connection):
+        self.logger.info("[db] ensure_migrations: старт")
         # guild_settings columns
         cur = await db.execute("PRAGMA table_info(guild_settings)")
         cols = [r[1] for r in await cur.fetchall()]
         await cur.close()
         if "auto_clean_seconds" not in cols:
+            self.logger.info("[db] ensure_migrations: добавляем guild_settings.auto_clean_seconds")
             await db.execute("ALTER TABLE guild_settings ADD COLUMN auto_clean_seconds INTEGER DEFAULT 0")
         if "status_week_anchor" not in cols:
+            self.logger.info("[db] ensure_migrations: добавляем guild_settings.status_week_anchor")
             await db.execute("ALTER TABLE guild_settings ADD COLUMN status_week_anchor TEXT")
 
         # systems columns
@@ -386,19 +389,24 @@ class NigilBot:
         scols = [r[1] for r in await cur.fetchall()]
         await cur.close()
         if "position" not in scols:
+            self.logger.info("[db] ensure_migrations: добавляем systems.position")
             await db.execute("ALTER TABLE systems ADD COLUMN position INTEGER DEFAULT 0")
         if "comment" not in scols:
+            self.logger.info("[db] ensure_migrations: добавляем systems.comment")
             await db.execute("ALTER TABLE systems ADD COLUMN comment TEXT DEFAULT ''")
         await db.commit()
 
         # заполнить position по умолчанию (id-порядок) для тех, у кого 0/NULL
+        self.logger.info("[db] ensure_migrations: заполняем position по умолчанию")
         await db.execute("""
             UPDATE systems SET position = id
             WHERE (position IS NULL OR position = 0)
         """)
         await db.commit()
+        self.logger.info("[db] ensure_migrations: завершено")
 
     async def init_db(self):
+        self.logger.info("[db] init_db: подключение к %s", self.DB_PATH)
         INIT_SQL = """
         PRAGMA journal_mode = WAL;
 
@@ -436,10 +444,12 @@ class NigilBot:
         );
         """
         self.db = await aiosqlite.connect(self.DB_PATH)
+        self.logger.info("[db] init_db: выполнение INIT_SQL")
         await self.db.executescript(INIT_SQL)
         await self.db.commit()
         await self.ensure_migrations(self.db)
         self.repo = Repo(self.db)
+        self.logger.info("[db] init_db: готово")
 
     # ---------- Time anchors ----------
     def week_reset_anchor(self, ref: Optional[datetime] = None) -> datetime:
@@ -507,6 +517,11 @@ class NigilBot:
             guild = interaction.guild
             if not guild:
                 return
+            self.outer.logger.info(
+                "[ui:StatsView] user=%s guild=%s action=two_weeks",
+                getattr(interaction.user, "id", "?"),
+                getattr(guild, "id", "?"),
+            )
             text = await self.outer.build_two_weeks_stats_text(guild)
             await interaction.response.send_message(text, ephemeral=True)
 
@@ -517,12 +532,15 @@ class NigilBot:
         @bot.event
         async def on_ready():
             try:
+                self.logger.info("[READY] on_ready: старт")
                 await self.init_db()
                 await bot.tree.sync()
                 self.logger.info("[READY] Вошёл как %s (id: %s)", bot.user, getattr(bot.user, "id", "?"))
                 bot.add_view(self.StatsView(self))
 
-                for guild in bot.guilds:
+                guilds = list(bot.guilds)
+                self.logger.info("[READY] on_ready: синхронизируем %s гильдий", len(guilds))
+                for guild in guilds:
                     ch = guild.get_channel(self.CHANNEL_ID)
                     if isinstance(ch, discord.TextChannel):
                         await self.repo.set_status_channel(guild.id, self.CHANNEL_ID)
@@ -546,6 +564,12 @@ class NigilBot:
         async def systems_autocomplete(interaction: discord.Interaction, current: str):
             names = await self.repo.list_systems(interaction.guild_id)
             q = (current or "").upper()
+            self.logger.info(
+                "[autocomplete:systems] user=%s guild=%s query=%s",
+                getattr(interaction.user, "id", "?"),
+                getattr(interaction.guild, "id", "?"),
+                q,
+            )
             if q:
                 names = [n for n in names if q in n.upper()]
             return [app_commands.Choice(name=n, value=n) for n in names[:25]]
@@ -925,24 +949,38 @@ class NigilBot:
             return
         self.logger.info("[schedule_cleanup] Запланирована очистка через %s сек", seconds)
         await asyncio.sleep(seconds)
+        user_deleted = False
+        bot_deleted = False
         try:
             if user_msg and channel.permissions_for(channel.guild.me).manage_messages:
                 await user_msg.delete()
+                user_deleted = True
         except Exception:
             self.logger.exception("[schedule_cleanup] Ошибка при удалении сообщения пользователя")
         try:
             if bot_msg:
                 await bot_msg.delete()
+                bot_deleted = True
         except Exception:
             self.logger.exception("[schedule_cleanup] Ошибка при удалении сообщения бота")
+        self.logger.info(
+            "[schedule_cleanup] Очистка завершена: user_deleted=%s bot_deleted=%s",
+            user_deleted,
+            bot_deleted,
+        )
 
     async def weekly_rollover(self):
-        self.logger.info("[weekly_rollover] Обновление для всех гильдий")
-        for guild in self.bot.guilds:
+        guilds = list(self.bot.guilds)
+        self.logger.info("[weekly_rollover] Обновление для %s гильдий", len(guilds))
+        for guild in guilds:
+            self.logger.info("[weekly_rollover] Обновление guild=%s", getattr(guild, "id", "?"))
             await self.refresh_live_post(guild)
 
     async def periodic_tick(self):
-        for guild in self.bot.guilds:
+        guilds = list(self.bot.guilds)
+        self.logger.info("[periodic_tick] Обновление для %s гильдий", len(guilds))
+        for guild in guilds:
+            self.logger.info("[periodic_tick] Обновление guild=%s", getattr(guild, "id", "?"))
             await self.refresh_live_post(guild)
 
     # ---------- Embeds (единый список) ----------
